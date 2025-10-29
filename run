@@ -1,0 +1,3 @@
+source .venv/bin/activate
+
+mlx_whisper "${1}" -f txt --output-name "${2}"
