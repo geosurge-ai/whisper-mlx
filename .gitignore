@@ -1,0 +1,79 @@
+# --- Core Nix files ---
+# Keep flake.nix and flake.lock tracked!
+/result
+/.direnv/
+/.nix-profile
+/nix-shell-*
+.envrc
+.cache/
+.envrc-local
+# Nix store paths (if any)
+/.nix-channels
+/nix/
+*.drv
+*.narinfo
+
+# --- Python / virtualenv ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+.tox/
+.mypy_cache/
+.dmypy.json
+pytest_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.log
+
+# --- Whisper / MLX artefacts ---
+# Transcripts and temporary audio conversions
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mov
+*.flac
+*.ogg
+*.srt
+*.vtt
+*.json
+*.txt
+
+# Model checkpoints or converted weights
+mlx_models/
+models/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# --- Editor / OS fluff ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+
+# --- Miscellaneous ---
+logs/
+tmp/
+scratch/
+notes/
+
+/result
+/.direnv

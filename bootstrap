@@ -1,0 +1,2 @@
+mkdir -p ~/whisper-mlx && cd ~/whisper-mlx
+nix develop
