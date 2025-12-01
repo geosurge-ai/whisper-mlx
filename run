@@ -1,3 +1,6 @@
 source .venv/bin/activate
 
-mlx_whisper "${1}" -f txt --output-name "${2}"
+mlx_whisper "${1}" -f txt --output-name "${2}" \
+  --model mlx-community/whisper-large-v3-mlx \
+  --condition-on-previous-text False \
+  --hallucination-silence-threshold 1
