@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run interactive LLM chat session
+#
+# Usage:
+#   ./run-llm           # Use default (large/32B) model
+#   ./run-llm medium    # Use medium (14B) model
+#   ./run-llm small     # Use small (7B) model
+
+source .venv/bin/activate
+
+MODEL_SIZE="${1:-large}"
+
+python llm.py "$MODEL_SIZE"
