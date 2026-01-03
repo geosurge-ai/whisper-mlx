@@ -5,10 +5,12 @@ Architecture:
 - ChatService: orchestrates conversation flow with tool execution
 - Uses singleton QwenModel for inference
 - Integrates with ToolRegistry for tool execution
+- Supports both sync and async operation modes
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -353,6 +355,131 @@ class ChatService:
         for msg in conversation:
             messages.append({"role": msg.role, "content": msg.content})
         return messages
+
+    async def chat_async(
+        self,
+        user_message: str,
+        profile_name: str = "general",
+        conversation_history: list[ChatMessage] | None = None,
+        verbose: bool = False,
+    ) -> ChatResponse:
+        """
+        Process a chat message with the specified agent profile (async version).
+
+        This version supports async tools (like browser tools) and runs model
+        generation in a thread pool to avoid blocking the event loop.
+
+        Args:
+            user_message: The user's input
+            profile_name: Name of agent profile to use
+            conversation_history: Optional prior conversation context
+            verbose: Whether to print debug info
+
+        Returns:
+            ChatResponse with final content and metadata
+        """
+        profile = AGENT_PROFILES.get(profile_name)
+        if profile is None:
+            return ChatResponse(
+                content=f"Unknown profile: {profile_name}",
+                tool_calls=(),
+                tool_results=(),
+                rounds_used=0,
+                finished=True,
+            )
+
+        tools = get_tools_for_profile(profile_name)
+        system_prompt = build_system_prompt(profile, tools)
+
+        # Build initial conversation
+        conversation: list[ChatMessage] = list(conversation_history or [])
+        conversation.append(ChatMessage("user", user_message))
+
+        all_tool_calls: list[ToolCall] = []
+        all_tool_results: list[ToolResult] = []
+        response: str = ""  # Initialize for type checker; always assigned in loop
+
+        for round_num in range(profile.max_tool_rounds):
+            # Build messages for model
+            messages = self._build_messages(system_prompt, conversation)
+
+            if verbose:
+                print(f"\n⏳ Round {round_num + 1} - Generating...")
+
+            # Run model generation in thread pool (MLX-LM is synchronous)
+            response = await asyncio.to_thread(
+                self._model.generate, messages, profile.max_tokens
+            )
+
+            if verbose:
+                preview = response[:500] + "..." if len(response) > 500 else response
+                print(
+                    f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}"
+                )
+
+            # Parse tool calls
+            tool_calls = parse_tool_calls(response)
+
+            if not tool_calls:
+                # No tool calls - return final response
+                final_content = extract_final_response(response)
+
+                # Handle model stuck in thinking loop
+                if (
+                    "<think>" in response
+                    and len(final_content) < 50
+                    and round_num < 3
+                    and tools
+                ):
+                    if verbose:
+                        print("🔄 Model thinking without acting, nudging...")
+                    conversation.append(ChatMessage("assistant", response))
+                    conversation.append(
+                        ChatMessage(
+                            "user", "Now use your tools to help answer the question."
+                        )
+                    )
+                    continue
+
+                return ChatResponse(
+                    content=final_content,
+                    tool_calls=tuple(all_tool_calls),
+                    tool_results=tuple(all_tool_results),
+                    rounds_used=round_num + 1,
+                    finished=True,
+                )
+
+            if verbose:
+                print(f"🔧 Found {len(tool_calls)} tool call(s):")
+                for tc in tool_calls:
+                    print(f"   - {tc.name}({tc.arguments})")
+
+            # Execute tools (async-aware)
+            round_results: list[ToolResult] = []
+            for tc in tool_calls:
+                result = await self._registry.execute_async(tc.name, tc.arguments)
+                round_results.append(ToolResult(tc.name, result))
+                all_tool_calls.append(tc)
+                all_tool_results.append(round_results[-1])
+
+            if verbose:
+                print("📦 Tool results:")
+                for tr in round_results:
+                    preview = tr.result[:200]
+                    print(f"   - {tr.tool_name}: {preview}")
+
+            # Add to conversation
+            conversation.append(ChatMessage("assistant", response))
+            conversation.append(ChatMessage("user", format_tool_results(round_results)))
+
+        # Max rounds reached
+        return ChatResponse(
+            content=extract_final_response(response),
+            tool_calls=tuple(all_tool_calls),
+            tool_results=tuple(all_tool_results),
+            rounds_used=profile.max_tool_rounds,
+            finished=False,  # Hit limit, might not be complete
+        )
 
 
 # --- Factory Functions ---

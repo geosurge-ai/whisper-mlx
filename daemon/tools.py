@@ -5,16 +5,19 @@ Architecture:
 - ToolRegistry: singleton mapping tool names -> callable implementations
 - Tool implementations are imported from existing agents or defined here
 - Registry is populated at daemon startup
+- Supports both sync and async tool functions
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
-from typing import Any, Callable
+from typing import Any, Callable, Coroutine
 
 
-# Type alias for tool functions
-ToolFunction = Callable[..., str]
+# Type alias for tool functions (sync or async)
+ToolFunction = Callable[..., str | Coroutine[Any, Any, str]]
 ToolLoader = Callable[[], dict[str, ToolFunction]]
 
 
@@ -24,6 +27,7 @@ class ToolRegistry:
 
     Separates tool schemas (in config.py) from implementations (here).
     Allows dynamic registration and lazy loading of tool implementations.
+    Supports both sync and async tool functions.
     """
 
     def __init__(self) -> None:
@@ -52,7 +56,32 @@ class ToolRegistry:
 
     def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """
-        Execute a tool by name with given arguments.
+        Execute a SYNC tool by name with given arguments.
+
+        Returns JSON string result or error.
+        NOTE: For async tools, use execute_async() instead.
+        """
+        tool = self.get(name)
+        if tool is None:
+            return json.dumps({"error": f"Unknown tool: {name}"})
+
+        try:
+            result = tool(**arguments)
+            # If accidentally called on async tool, handle gracefully
+            if inspect.iscoroutine(result):
+                result.close()  # Prevent "coroutine never awaited" warning
+                return json.dumps({"error": f"Tool {name} is async, use execute_async()"})
+            return result  # type: ignore
+        except Exception as e:
+            return json.dumps({"error": f"Tool execution failed: {str(e)}"})
+
+    async def execute_async(self, name: str, arguments: dict[str, Any]) -> str:
+        """
+        Execute a tool by name with given arguments (async-aware).
+
+        Handles both sync and async tools:
+        - Async tools are awaited directly
+        - Sync tools are run in a thread pool to avoid blocking
 
         Returns JSON string result or error.
         """
@@ -61,7 +90,12 @@ class ToolRegistry:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
         try:
-            result: str = tool(**arguments)
+            if asyncio.iscoroutinefunction(tool):
+                # Async tool - await directly
+                result: str = await tool(**arguments)
+            else:
+                # Sync tool - run in thread pool to avoid blocking event loop
+                result = await asyncio.to_thread(tool, **arguments)
             return result
         except Exception as e:
             return json.dumps({"error": f"Tool execution failed: {str(e)}"})
@@ -146,7 +180,7 @@ def _create_mirror_tools_loader() -> ToolLoader:
 
 
 def _create_browser_tools_loader() -> ToolLoader:
-    """Create lazy loaders for browser tools."""
+    """Create lazy loaders for browser tools (async versions)."""
     _cache: dict[str, ToolFunction] = {}
 
     def load_browser_tools() -> dict[str, ToolFunction]:
@@ -154,40 +188,17 @@ def _create_browser_tools_loader() -> ToolLoader:
             return _cache
 
         try:
-            from code_runner_agent import (
-                web_search,
-                browser_navigate,
-                browser_get_text,
-                browser_click,
-                browser_get_elements,
-                browser_wait,
-                browser_paste_code,
-                browser_type_slow,
-                browser_press_key,
-                browser_analyze_page,
-            )
+            # Import async browser tools from daemon.browser
+            from .browser import ASYNC_BROWSER_TOOLS
 
-            _cache.update(
-                {
-                    "web_search": web_search,
-                    "browser_navigate": browser_navigate,
-                    "browser_get_text": browser_get_text,
-                    "browser_click": browser_click,
-                    "browser_get_elements": browser_get_elements,
-                    "browser_wait": browser_wait,
-                    "browser_paste_code": browser_paste_code,
-                    "browser_type_slow": browser_type_slow,
-                    "browser_press_key": browser_press_key,
-                    "browser_analyze_page": browser_analyze_page,
-                }
-            )
+            _cache.update(ASYNC_BROWSER_TOOLS)
         except ImportError as e:
             err_msg = str(e)
 
             def make_stub(error: str) -> ToolFunction:
                 def stub(**kwargs: Any) -> str:
                     return json.dumps(
-                        {"error": f"code_runner_agent not available: {error}"}
+                        {"error": f"browser tools not available: {error}"}
                     )
 
                 return stub

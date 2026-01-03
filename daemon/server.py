@@ -392,6 +392,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(f"   Available profiles: {list(AGENT_PROFILES.keys())}")
     logger.info(f"   Available tools: {list(ALL_TOOL_SPECS.keys())}")
     
+    # Prune ALL empty sessions on startup (max_age=0 means delete all empty)
+    store = get_session_store()
+    pruned = store.prune_empty(max_age_seconds=0)
+    if pruned > 0:
+        logger.info(f"   🗑️ Pruned {pruned} empty session(s) on startup")
+    
     # Pre-load the model at startup so first request doesn't freeze
     logger.info("   Loading model (this may take 30-60 seconds)...")
     start_time = time.time()
@@ -400,7 +406,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(f"   ✓ Model loaded and ready in {elapsed:.1f}s!")
     
     yield
+    
+    # Cleanup browser on shutdown
     logger.info("👋 Qwen Daemon shutting down...")
+    try:
+        from .browser import get_browser_manager
+        browser_manager = get_browser_manager()
+        if browser_manager.is_running:
+            await browser_manager.close()
+    except Exception as e:
+        logger.warning(f"Error closing browser: {e}")
 
 
 app = FastAPI(
@@ -467,8 +482,8 @@ async def chat(request: ChatRequest) -> ChatResponseModel:
         ChatMessage(m.role, m.content) for m in request.history
     ]
 
-    # Process chat
-    result = service.chat(
+    # Process chat using async method (supports async tools like browser)
+    result = await service.chat_async(
         user_message=request.message,
         profile_name=request.profile,
         conversation_history=history,
@@ -499,6 +514,7 @@ async def invoke_tool(request: ToolInvokeRequest) -> ToolInvokeResponse:
 
     Executes a tool directly without LLM involvement.
     Useful for testing tools or scripted workflows.
+    Supports both sync and async tools.
     """
     start_time = time.perf_counter()
 
@@ -508,7 +524,8 @@ async def invoke_tool(request: ToolInvokeRequest) -> ToolInvokeResponse:
             status_code=404, detail=f"Unknown tool: {request.tool_name}"
         )
 
-    result = registry.execute(request.tool_name, request.arguments)
+    # Use async execution to support both sync and async tools
+    result = await registry.execute_async(request.tool_name, request.arguments)
 
     # Parse result if it's JSON
     parsed_result: Any
@@ -618,6 +635,10 @@ async def get_generation_status() -> GenerationStatus:
 async def list_sessions(limit: int = 50) -> list[SessionSummaryModel]:
     """List all sessions (summaries only, sorted by most recent)."""
     store = get_session_store()
+    # Prune empty sessions older than 60 seconds before listing
+    pruned = store.prune_empty(max_age_seconds=60)
+    if pruned > 0:
+        logger.info(f"🗑️ Pruned {pruned} empty session(s)")
     summaries = store.list_summaries(limit=limit)
     logger.debug(f"GET /v1/sessions - returning {len(summaries)} sessions")
     return [
@@ -757,8 +778,8 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                     logger.info(f"🤖 Starting generation for session {session_id[:8]} with {len(history)} history messages...")
                     gen_start = time.perf_counter()
                     
-                    # Generate response
-                    result = service.chat(
+                    # Generate response using async chat (supports async tools like browser)
+                    result = await service.chat_async(
                         user_message=request.message,
                         profile_name=session.profile_name,
                         conversation_history=history,
