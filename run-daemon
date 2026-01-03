@@ -11,6 +11,11 @@ if [[ -z "${IN_NIX_SHELL:-}" ]]; then
     exec nix develop --command "$0" "$@"
 fi
 
+# Activate venv if it exists (contains pip-installed packages)
+if [[ -d ".venv" ]]; then
+    source .venv/bin/activate
+fi
+
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
 echo "Starting Qwen Daemon..."

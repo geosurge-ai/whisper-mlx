@@ -9,18 +9,26 @@ Endpoints:
 - GET  /v1/tools         - List available tools
 
 Startup behavior:
-- Model is loaded lazily on first /v1/chat request (not at startup)
-- This allows quick server restarts for config changes
+- Model is pre-loaded at startup for fast first response
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger('qwen.server')
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -265,17 +273,19 @@ class AppState:
 
     def set_generating(self, value: bool, session_id: str | None = None) -> None:
         """Set generation status and optionally the generating session ID.
-        
+
         NOTE: We do NOT remove from queue here - that's done by remove_from_queue
         when generation is fully complete. Removing early would cause later arrivals
         to see an empty queue and get incorrect position calculations.
         """
         with self._queue_lock:
+            logger.debug(f"set_generating({value}, session={session_id}) - was generating: {self._generation_in_progress}")
             self._generation_in_progress = value
             if value and session_id:
                 self._generating_session_id = session_id
-                # Keep in queue - position tracking depends on it
+                logger.info(f"🔄 Generation STARTED for session {session_id[:8]}...")
             elif not value:
+                logger.info(f"✅ Generation FINISHED for session {self._generating_session_id[:8] if self._generating_session_id else 'unknown'}")
                 self._generating_session_id = None
 
     def add_to_queue(self, session_id: str) -> int:
@@ -293,6 +303,7 @@ class AppState:
         with self._queue_lock:
             # Check if already has a position (shouldn't happen, but be safe)
             if session_id in self._position_map:
+                logger.debug(f"Session {session_id[:8]} already in queue at position {self._position_map[session_id]}")
                 return self._position_map[session_id]
             
             # Get next position from counter
@@ -304,6 +315,8 @@ class AppState:
             if session_id not in self._queued_session_ids:
                 self._queued_session_ids.append(session_id)
             
+            queue_size = len(self._queued_session_ids)
+            logger.info(f"📥 Session {session_id[:8]} added to queue at position {position} (queue size: {queue_size})")
             return position
 
     def remove_from_queue(self, session_id: str) -> None:
@@ -320,12 +333,18 @@ class AppState:
         10, 11, 12 but the relative order is still meaningful.
         """
         with self._queue_lock:
+            was_in_queue = session_id in self._queued_session_ids
+            was_generating = self._generating_session_id == session_id
+            
             if session_id in self._queued_session_ids:
                 self._queued_session_ids.remove(session_id)
             if session_id in self._position_map:
                 del self._position_map[session_id]
             if self._generating_session_id == session_id:
                 self._generating_session_id = None
+            
+            queue_size = len(self._queued_session_ids)
+            logger.info(f"📤 Session {session_id[:8]} removed from queue (was_in_queue={was_in_queue}, was_generating={was_generating}, remaining: {queue_size})")
 
     def get_generation_status(self) -> GenerationStatus:
         """Get current generation queue status."""
@@ -338,9 +357,15 @@ class AppState:
     def get_chat_service(self, model_size: ModelSize) -> ChatService:
         """Get or create chat service for model size."""
         if model_size not in self._chat_services:
+            logger.info(f"🔧 Creating new chat service for model size: {model_size.name}")
+            start_time = time.time()
             self._chat_services[model_size] = create_chat_service(model_size)
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Chat service created in {elapsed:.1f}s")
+        else:
+            logger.debug(f"Reusing existing chat service for {model_size.name}")
         self._current_model_size = model_size
-        self._model_loaded = True  # Model loads on first chat request
+        self._model_loaded = True
         return self._chat_services[model_size]
 
     @property
@@ -363,12 +388,19 @@ app_state = AppState()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan context manager for startup/shutdown."""
-    print("🚀 Qwen Daemon starting...")
-    print(f"   Available profiles: {list(AGENT_PROFILES.keys())}")
-    print(f"   Available tools: {list(ALL_TOOL_SPECS.keys())}")
-    print("   Model will load on first request.")
+    logger.info("🚀 Qwen Daemon starting...")
+    logger.info(f"   Available profiles: {list(AGENT_PROFILES.keys())}")
+    logger.info(f"   Available tools: {list(ALL_TOOL_SPECS.keys())}")
+    
+    # Pre-load the model at startup so first request doesn't freeze
+    logger.info("   Loading model (this may take 30-60 seconds)...")
+    start_time = time.time()
+    _ = app_state.get_chat_service(ModelSize.LARGE)
+    elapsed = time.time() - start_time
+    logger.info(f"   ✓ Model loaded and ready in {elapsed:.1f}s!")
+    
     yield
-    print("👋 Qwen Daemon shutting down...")
+    logger.info("👋 Qwen Daemon shutting down...")
 
 
 app = FastAPI(
@@ -385,13 +417,15 @@ app = FastAPI(
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """Health check endpoint with model status."""
+    is_gen = app_state.is_generating
+    logger.debug(f"GET /health - model_loaded={app_state.model_loaded}, generating={is_gen}")
     return HealthResponse(
         status="healthy",
         model_loaded=app_state.model_loaded,
         model_size=(
             app_state.current_model_size.name if app_state.current_model_size else None
         ),
-        generation_in_progress=app_state.is_generating,
+        generation_in_progress=is_gen,
         available_profiles=list(AGENT_PROFILES.keys()),
         available_tools=get_registry().available_tools,
     )
@@ -574,7 +608,10 @@ async def get_generation_status() -> GenerationStatus:
     - generating_session_id: Session currently generating (or null if idle)
     - queued_session_ids: Sessions waiting for their turn
     """
-    return app_state.get_generation_status()
+    status = app_state.get_generation_status()
+    if status.generating_session_id or status.queued_session_ids:
+        logger.debug(f"GET /v1/generation/status - generating={status.generating_session_id[:8] if status.generating_session_id else None}, queued={len(status.queued_session_ids)}")
+    return status
 
 
 @app.get("/v1/sessions", response_model=list[SessionSummaryModel])
@@ -582,6 +619,7 @@ async def list_sessions(limit: int = 50) -> list[SessionSummaryModel]:
     """List all sessions (summaries only, sorted by most recent)."""
     store = get_session_store()
     summaries = store.list_summaries(limit=limit)
+    logger.debug(f"GET /v1/sessions - returning {len(summaries)} sessions")
     return [
         SessionSummaryModel(
             id=s["id"],
@@ -645,6 +683,7 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
     If another generation is in progress, this request will wait (with timeout).
     """
     start_time = time.perf_counter()
+    logger.info(f"📨 POST /v1/sessions/{session_id[:8]}.../chat - message: {request.message[:50]}...")
 
     # Validate model size
     size_map: dict[str, ModelSize] = {
@@ -654,6 +693,7 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
     }
     model_size = size_map.get(request.model_size.lower())
     if model_size is None:
+        logger.error(f"Invalid model_size: {request.model_size}")
         raise HTTPException(
             status_code=400, detail=f"Invalid model_size: {request.model_size}"
         )
@@ -662,16 +702,21 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
     store = get_session_store()
     session = store.get(session_id)
     if session is None:
+        logger.error(f"Session not found: {session_id}")
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    logger.debug(f"Loaded session: profile={session.profile_name}, messages={len(session.messages)}")
 
     # Validate profile
     if session.profile_name not in AGENT_PROFILES:
+        logger.error(f"Unknown profile: {session.profile_name}")
         raise HTTPException(
             status_code=400, detail=f"Unknown profile: {session.profile_name}"
         )
 
     # Add user message immediately (before generation)
     session.add_message(role="user", content=request.message)
+    logger.debug(f"Added user message to session, now has {len(session.messages)} messages")
 
     # Add to queue and get position atomically
     queue_position = app_state.add_to_queue(session_id)
@@ -684,6 +729,8 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
     # request even calls add_to_queue().
     await asyncio.sleep(0)
 
+    logger.debug(f"Session {session_id[:8]} waiting for generation lock...")
+
     # Acquire generation lock with timeout
     try:
         async with asyncio.timeout(300):  # 5 minute timeout for lock acquisition + generation
@@ -692,6 +739,8 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                 lock_acquired_time = time.perf_counter()
                 queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
                 was_queued = queue_wait_ms > 10  # Consider >10ms as "was queued"
+                
+                logger.info(f"🔓 Session {session_id[:8]} acquired lock (waited {queue_wait_ms:.0f}ms, position={queue_position})")
 
                 # Mark as generating (moves from queued to generating)
                 app_state.set_generating(True, session_id=session_id)
@@ -705,6 +754,9 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                         for msg in session.messages[:-1]  # Exclude the user message we just added
                     ]
 
+                    logger.info(f"🤖 Starting generation for session {session_id[:8]} with {len(history)} history messages...")
+                    gen_start = time.perf_counter()
+                    
                     # Generate response
                     result = service.chat(
                         user_message=request.message,
@@ -712,6 +764,9 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                         conversation_history=history,
                         verbose=request.verbose,
                     )
+                    
+                    gen_elapsed = (time.perf_counter() - gen_start) * 1000
+                    logger.info(f"🤖 Generation complete for session {session_id[:8]} in {gen_elapsed:.0f}ms (rounds={result.rounds_used}, tools={len(result.tool_calls)})")
 
                     # Add assistant message
                     session.add_message(
@@ -723,6 +778,7 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
 
                     # Save session
                     store.save(session)
+                    logger.debug(f"Session {session_id[:8]} saved with {len(session.messages)} messages")
 
                 finally:
                     # Clear generation status
@@ -731,6 +787,7 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
 
     except asyncio.TimeoutError:
         # Clean up queue on timeout
+        logger.error(f"⏰ Session {session_id[:8]} timed out waiting for generation")
         app_state.remove_from_queue(session_id)
         raise HTTPException(
             status_code=503,

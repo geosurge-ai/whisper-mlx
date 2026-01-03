@@ -21,9 +21,13 @@ export default function App() {
   const {
     // State
     connectionStatus,
+    generationInProgress,
+    generatingSessionId,
+    queuedSessionIds,
     profiles,
     selectedProfile,
     profileTools,
+    sessions,
     currentSession,
     chatLoading,
     chatError,
@@ -31,6 +35,7 @@ export default function App() {
     recentCommands,
     profilesLoading,
     toolsLoading,
+    sessionsLoading,
     commands,
 
     // Actions
@@ -39,19 +44,30 @@ export default function App() {
     clearError,
     openPalette,
     closePalette,
+    newSession,
+    switchSession,
   } = useAppState()
 
   return (
     <>
       <Layout
         connectionStatus={connectionStatus}
+        generationInProgress={generationInProgress}
+        generatingSessionId={generatingSessionId}
         onCommandPalette={openPalette}
         rail={
           <ProfileRail
             profiles={profiles}
             selectedProfile={selectedProfile}
             onSelectProfile={selectProfile}
+            sessions={sessions}
+            currentSessionId={currentSession?.id ?? null}
+            onSwitchSession={switchSession}
+            onNewSession={newSession}
+            generatingSessionId={generatingSessionId}
+            queuedSessionIds={queuedSessionIds}
             loading={profilesLoading}
+            sessionsLoading={sessionsLoading}
           />
         }
         main={

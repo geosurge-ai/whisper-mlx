@@ -28,6 +28,8 @@ interface LayoutProps {
   main: ReactNode
   detail?: ReactNode
   connectionStatus: 'online' | 'offline' | 'checking'
+  generationInProgress?: boolean
+  generatingSessionId?: string | null
   onCommandPalette: () => void
 }
 
@@ -36,6 +38,8 @@ export function Layout({
   main,
   detail,
   connectionStatus,
+  generationInProgress = false,
+  generatingSessionId,
   onCommandPalette,
 }: LayoutProps) {
   return (
@@ -59,7 +63,11 @@ export function Layout({
         </button>
 
         <div className="layout-header-right">
-          <StatusIndicator status={connectionStatus} />
+          <StatusIndicator 
+            status={connectionStatus} 
+            generationInProgress={generationInProgress}
+            generatingSessionId={generatingSessionId}
+          />
         </div>
       </header>
 
@@ -85,7 +93,25 @@ export function Layout({
 
 // --- Status Indicator ---
 
-function StatusIndicator({ status }: { status: 'online' | 'offline' | 'checking' }) {
+interface StatusIndicatorProps {
+  status: 'online' | 'offline' | 'checking'
+  generationInProgress?: boolean
+  generatingSessionId?: string | null
+}
+
+function StatusIndicator({ status, generationInProgress, generatingSessionId }: StatusIndicatorProps) {
+  // Show generation status when online and generating
+  if (status === 'online' && generationInProgress) {
+    return (
+      <div className="status-indicator status-indicator-generating" role="status">
+        <span className="status-indicator-dot status-indicator-dot-pulse" />
+        <span className="status-indicator-label">
+          Generating{generatingSessionId ? '...' : ''}
+        </span>
+      </div>
+    )
+  }
+
   const labels = {
     online: 'Connected',
     offline: 'Offline',

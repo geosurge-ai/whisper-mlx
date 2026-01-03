@@ -5,9 +5,9 @@
  * Sessions are stored on the backend, localStorage serves as cache.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useLocalStorage } from './useLocalStorage'
-import type { ProfileInfo, ToolInfo, Session, SessionSummary } from '../api'
+import type { ProfileInfo, ToolInfo, Session, SessionSummary, SessionMessage } from '../api'
 import {
   getHealth,
   getProfiles,
@@ -16,6 +16,7 @@ import {
   createSession as apiCreateSession,
   getSession as apiGetSession,
   sendSessionChat,
+  getGenerationStatus,
   ApiError,
   NetworkError,
 } from '../api'
@@ -63,6 +64,8 @@ export function useAppState() {
   // Ephemeral state
   const [connectionStatus, setConnectionStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [generationInProgress, setGenerationInProgress] = useState(false)
+  const [generatingSessionId, setGeneratingSessionId] = useState<string | null>(null)
+  const [queuedSessionIds, setQueuedSessionIds] = useState<string[]>([])
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
   const [profileTools, setProfileTools] = useState<ToolInfo[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -74,27 +77,74 @@ export function useAppState() {
   const [chatError, setChatError] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
 
+  // Track previous generation state to detect when generation completes
+  const prevGenerationInProgress = useRef(false)
+
+  // --- Debug Logging Helper ---
+  const debug = (msg: string, data?: unknown) => {
+    if (data !== undefined) {
+      console.log(`[useAppState] ${msg}`, data)
+    } else {
+      console.log(`[useAppState] ${msg}`)
+    }
+  }
+
   // --- Effects ---
 
-  // Check connection on mount and poll for generation status
+  // Check connection on mount
   useEffect(() => {
     async function checkConnection() {
       setConnectionStatus('checking')
       try {
         const health = await getHealth()
+        debug(`Health check: model_loaded=${health.model_loaded}, generating=${health.generation_in_progress}`)
         setConnectionStatus('online')
         setGenerationInProgress(health.generation_in_progress)
-      } catch {
+      } catch (err) {
+        debug('Health check failed, going offline', err)
         setConnectionStatus('offline')
       }
     }
 
     void checkConnection()
 
-    // Recheck every 10s (more frequent to track generation status)
+    // Recheck connection every 10s
     const interval = setInterval(() => void checkConnection(), 10000)
     return () => clearInterval(interval)
   }, [])
+
+  // Poll generation status more frequently when generation is in progress
+  useEffect(() => {
+    if (connectionStatus !== 'online') return
+    if (!generationInProgress && !chatLoading) return
+
+    debug(`Starting generation polling (generationInProgress=${generationInProgress}, chatLoading=${chatLoading})`)
+
+    async function pollGenerationStatus() {
+      try {
+        const status = await getGenerationStatus()
+        if (status.generating_session_id || status.queued_session_ids.length > 0) {
+          debug(`Poll: generating=${status.generating_session_id?.slice(0, 8)}, queued=${status.queued_session_ids.length}`)
+        }
+        setGeneratingSessionId(status.generating_session_id)
+        setQueuedSessionIds(status.queued_session_ids)
+        // Update generationInProgress based on actual backend state
+        const isActive = status.generating_session_id !== null || status.queued_session_ids.length > 0
+        if (isActive !== generationInProgress) {
+          debug(`Generation state changed: ${generationInProgress} -> ${isActive}`)
+        }
+        setGenerationInProgress(isActive)
+      } catch (err) {
+        debug('Poll failed', err)
+      }
+    }
+
+    void pollGenerationStatus()
+
+    // Poll every 2 seconds during generation
+    const interval = setInterval(() => void pollGenerationStatus(), 2000)
+    return () => clearInterval(interval)
+  }, [connectionStatus, generationInProgress, chatLoading])
 
   // Fetch profiles when online
   useEffect(() => {
@@ -139,9 +189,16 @@ export function useAppState() {
     if (connectionStatus !== 'online') return
 
     async function fetchSessions() {
+      debug('Fetching sessions from backend...')
       setSessionsLoading(true)
       try {
         const data = await listSessions()
+        debug(`Fetched ${data.length} sessions`, data.map(s => ({
+          id: s.id.slice(0, 8),
+          profile: s.profile_name,
+          messages: s.message_count,
+          title: s.title?.slice(0, 30)
+        })))
         setSessions(data)
       } catch (error) {
         console.error('Failed to fetch sessions:', error)
@@ -152,6 +209,30 @@ export function useAppState() {
 
     void fetchSessions()
   }, [connectionStatus])
+
+  // Refresh sessions when generation completes
+  useEffect(() => {
+    // Detect transition from generating to not generating
+    const wasGenerating = prevGenerationInProgress.current
+    prevGenerationInProgress.current = generationInProgress
+
+    if (wasGenerating && !generationInProgress && connectionStatus === 'online') {
+      // Generation just completed - refresh session list to update message counts
+      debug('Generation completed, refreshing sessions...')
+      void (async () => {
+        try {
+          const data = await listSessions()
+          debug(`Sessions refreshed: ${data.length} sessions`, data.map(s => ({
+            id: s.id.slice(0, 8),
+            messages: s.message_count
+          })))
+          setSessions(data)
+        } catch (error) {
+          console.error('Failed to refresh sessions:', error)
+        }
+      })()
+    }
+  }, [generationInProgress, connectionStatus])
 
   // Load current session from backend when ID changes
   useEffect(() => {
@@ -214,13 +295,16 @@ export function useAppState() {
   // --- Actions ---
 
   const selectProfile = useCallback(async (name: string) => {
+    debug(`Selecting profile: ${name}`)
     setSelectedProfile(name)
     setChatError(null)
 
     // Create new session for new profile
     if (connectionStatus === 'online') {
       try {
+        debug(`Creating new session for profile ${name}...`)
         const session = await apiCreateSession({ profile_name: name })
+        debug(`Created session: ${session.id.slice(0, 8)}`)
         setCurrentSessionId(session.id)
         setCurrentSession(session)
         // Refresh sessions list
@@ -233,25 +317,62 @@ export function useAppState() {
   }, [connectionStatus, setSelectedProfile, setCurrentSessionId])
 
   const sendMessage = useCallback(async (content: string) => {
-    if (!currentSession || chatLoading || connectionStatus !== 'online') return
+    if (!currentSession || connectionStatus !== 'online') {
+      debug(`sendMessage blocked: currentSession=${!!currentSession}, connectionStatus=${connectionStatus}`)
+      return
+    }
+    // Don't block if already loading - allow queueing
+    if (chatLoading) {
+      debug('Generation already in progress, request will be queued')
+    }
+
+    debug(`📤 Sending message to session ${currentSession.id.slice(0, 8)}: "${content.slice(0, 50)}..."`)
+
+    // Optimistic update: add user message immediately
+    const tempUserMessage: SessionMessage = {
+      id: `temp-${Date.now()}`,
+      role: 'user',
+      content,
+      timestamp: Date.now() / 1000,
+      tool_calls: [],
+      tool_results: [],
+    }
+
+    debug('Optimistic update: adding temp user message')
+    setCurrentSession(prev => prev ? {
+      ...prev,
+      messages: [...prev.messages, tempUserMessage],
+    } : null)
 
     setChatLoading(true)
+    setGenerationInProgress(true)
     setChatError(null)
 
+    const startTime = Date.now()
     try {
+      debug('Calling sendSessionChat API...')
       // Send message via session chat endpoint (uses backend semaphore)
       const result = await sendSessionChat(currentSession.id, {
         message: content,
         model_size: 'large',
       })
 
-      // Update current session with response
+      const elapsed = Date.now() - startTime
+      debug(`📥 Response received in ${elapsed}ms:`, {
+        sessionMessages: result.session.messages.length,
+        queueStats: result.queue_stats,
+        toolCalls: result.response.tool_calls?.length ?? 0,
+      })
+
+      // Update current session with authoritative response from server
       setCurrentSession(result.session)
 
       // Refresh sessions list (title may have changed)
+      debug('Refreshing sessions list after response...')
       const data = await listSessions()
       setSessions(data)
     } catch (error) {
+      debug('❌ sendMessage error:', error)
       let errorMessage = 'Failed to send message'
       if (error instanceof ApiError) {
         if (error.status === 503) {
@@ -259,13 +380,23 @@ export function useAppState() {
         } else {
           errorMessage = error.detail ?? error.message
         }
+        debug(`API error: status=${error.status}, message=${errorMessage}`)
       } else if (error instanceof NetworkError) {
         errorMessage = 'Connection lost. Please check if the daemon is running.'
+        debug('Network error, going offline')
         setConnectionStatus('offline')
       }
       setChatError(errorMessage)
+      // Revert optimistic update on error
+      debug('Reverting optimistic update')
+      setCurrentSession(prev => prev ? {
+        ...prev,
+        messages: prev.messages.filter(m => m.id !== tempUserMessage.id),
+      } : null)
     } finally {
+      debug('sendMessage complete, resetting loading states')
       setChatLoading(false)
+      setGenerationInProgress(false)
     }
   }, [currentSession, chatLoading, connectionStatus])
 
@@ -288,13 +419,16 @@ export function useAppState() {
   const switchSession = useCallback(async (sessionId: string) => {
     if (connectionStatus !== 'online') return
 
+    debug(`Switching to session: ${sessionId.slice(0, 8)}`)
     setChatError(null)
     try {
       const session = await apiGetSession(sessionId)
+      debug(`Loaded session: ${session.messages.length} messages, profile=${session.profile_name}`)
       setCurrentSessionId(session.id)
       setCurrentSession(session)
       // Update selected profile to match session
       if (session.profile_name !== selectedProfile) {
+        debug(`Updating profile: ${selectedProfile} -> ${session.profile_name}`)
         setSelectedProfile(session.profile_name)
       }
     } catch (error) {
@@ -404,6 +538,8 @@ export function useAppState() {
     // State
     connectionStatus,
     generationInProgress,
+    generatingSessionId,
+    queuedSessionIds,
     profiles,
     selectedProfile,
     profileTools,

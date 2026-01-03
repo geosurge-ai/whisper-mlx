@@ -1,17 +1,24 @@
 /**
- * ProfileRail - Left sidebar for profile selection
+ * ProfileRail - Left sidebar for profile and session navigation
  *
- * Displays available profiles with Bauhaus-inspired color coding.
+ * Displays available profiles and sessions with Bauhaus-inspired color coding.
  */
 
-import type { ProfileInfo } from '../api'
+import type { ProfileInfo, SessionSummary } from '../api'
 import './ProfileRail.css'
 
 interface ProfileRailProps {
   profiles: ProfileInfo[]
   selectedProfile: string
   onSelectProfile: (name: string) => void
+  sessions: SessionSummary[]
+  currentSessionId: string | null
+  onSwitchSession: (sessionId: string) => void
+  onNewSession: () => void
+  generatingSessionId?: string | null
+  queuedSessionIds?: string[]
   loading?: boolean
+  sessionsLoading?: boolean
 }
 
 // Bauhaus color mapping for profiles
@@ -25,8 +32,18 @@ export function ProfileRail({
   profiles,
   selectedProfile,
   onSelectProfile,
+  sessions,
+  currentSessionId,
+  onSwitchSession,
+  onNewSession,
+  generatingSessionId,
+  queuedSessionIds = [],
   loading,
+  sessionsLoading,
 }: ProfileRailProps) {
+  // Filter sessions for current profile
+  const profileSessions = sessions.filter(s => s.profile_name === selectedProfile)
+
   if (loading) {
     return (
       <div className="profile-rail">
@@ -42,6 +59,7 @@ export function ProfileRail({
 
   return (
     <nav className="profile-rail">
+      {/* Profiles Section */}
       <div className="profile-rail-header">
         <h2 className="profile-rail-title">Profiles</h2>
       </div>
@@ -72,9 +90,69 @@ export function ProfileRail({
         ))}
       </ul>
 
+      {/* Sessions Section */}
+      <div className="profile-rail-sessions">
+        <div className="profile-rail-sessions-header">
+          <h3 className="profile-rail-sessions-title">Sessions</h3>
+          <button
+            className="profile-rail-new-session"
+            onClick={onNewSession}
+            aria-label="New session"
+          >
+            +
+          </button>
+        </div>
+
+        {sessionsLoading ? (
+          <div className="profile-rail-loading">
+            <span>Loading...</span>
+          </div>
+        ) : profileSessions.length === 0 ? (
+          <div className="profile-rail-empty">
+            <span>No sessions yet</span>
+          </div>
+        ) : (
+          <ul className="session-list" role="listbox" aria-label="Select session">
+            {profileSessions.map((session) => {
+              const isGenerating = generatingSessionId === session.id
+              const isQueued = queuedSessionIds.includes(session.id)
+              const isCurrent = currentSessionId === session.id
+
+              return (
+                <li key={session.id}>
+                  <button
+                    className={`session-item ${isCurrent ? 'session-item-selected' : ''} ${isGenerating ? 'session-item-generating' : ''} ${isQueued ? 'session-item-queued' : ''}`}
+                    onClick={() => onSwitchSession(session.id)}
+                    role="option"
+                    aria-selected={isCurrent}
+                  >
+                    <div className="session-item-content">
+                      <span className="session-item-title">
+                        {session.title ?? 'Untitled session'}
+                      </span>
+                      <span className="session-item-meta">
+                        {session.message_count} messages
+                        {isGenerating && ' • Generating...'}
+                        {isQueued && ' • Queued'}
+                      </span>
+                    </div>
+                    {isGenerating && (
+                      <span className="session-item-status session-item-status-generating" />
+                    )}
+                    {isQueued && !isGenerating && (
+                      <span className="session-item-status session-item-status-queued" />
+                    )}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+
       <div className="profile-rail-footer">
         <p className="profile-rail-hint">
-          Press <kbd>⌘K</kbd> then type profile name
+          Press <kbd>⌘K</kbd> for quick actions
         </p>
       </div>
     </nav>
