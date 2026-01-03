@@ -1,0 +1,152 @@
+/*
+ * ToolsPanel Styles
+ *
+ * Bauhaus: Expandable cards with geometric accents, ample spacing.
+ */
+
+.tools-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.tools-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-6);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+
+.tools-panel-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-text-tertiary);
+}
+
+.tools-panel-count {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--color-secondary);
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-full);
+  min-width: 24px;
+  text-align: center;
+}
+
+.tools-panel-profile {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  text-transform: capitalize;
+}
+
+.tools-panel-loading,
+.tools-panel-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+  gap: var(--space-2);
+}
+
+.tools-panel-empty-hint {
+  font-size: var(--text-xs);
+}
+
+.tools-panel-empty-hint strong {
+  color: var(--color-text-secondary);
+}
+
+/* --- Tools List --- */
+
+.tools-list {
+  list-style: none;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.tool-item {
+  background-color: var(--color-bg-elevated);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color var(--transition-fast);
+}
+
+.tool-item:hover {
+  border-color: var(--color-border-strong);
+}
+
+.tool-item-expanded {
+  border-color: var(--color-secondary);
+}
+
+.tool-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-4);
+  text-align: left;
+}
+
+.tool-item-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-family: var(--font-mono);
+  color: var(--color-text-primary);
+}
+
+.tool-item-chevron {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  color: var(--color-text-tertiary);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tool-item-body {
+  padding: 0 var(--space-4) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  margin-top: var(--space-2);
+  padding-top: var(--space-4);
+}
+
+.tool-item-description {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-relaxed);
+  margin-bottom: var(--space-4);
+}
+
+.tool-item-invoke {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  background-color: var(--color-secondary);
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.tool-item-invoke:hover {
+  background-color: var(--color-primary);
+}

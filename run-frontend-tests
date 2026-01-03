@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Run frontend E2E tests with Playwright
+#
+# Setup/Teardown (automatic):
+#   - globalSetup: Starts daemon on port 5997
+#   - webServer: Starts frontend dev server on port 8792
+#   - globalTeardown: Stops daemon
+#
+# Usage:
+#   ./run-frontend-tests           # Run headless
+#   ./run-frontend-tests --headed  # Run with visible browser
+#   ./run-frontend-tests --ui      # Run with Playwright UI
+
+set -euo pipefail
+
+cd "$(dirname "$0")/frontend"
+
+# Install deps if needed
+if [ ! -d "node_modules" ]; then
+    echo "📦 Installing dependencies..."
+    pnpm install
+fi
+
+# Install Playwright browsers if needed
+if ! pnpm exec playwright --version &>/dev/null; then
+    echo "📦 Installing Playwright browsers..."
+    pnpm exec playwright install chromium
+fi
+
+echo "🧪 Frontend E2E Tests (Playwright + Chromium)"
+echo "=============================================="
+echo ""
+echo "Setup:    Daemon + frontend started automatically"
+echo "Teardown: Daemon stopped after tests complete"
+echo ""
+
+# Run tests
+exec pnpm exec playwright test "$@"

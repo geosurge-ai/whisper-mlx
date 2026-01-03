@@ -16,5 +16,6 @@ playwright>=1.40.0    # Browser automation (code_runner_agent)
 # Development & Testing
 httpx>=0.27.0        # For async client testing
 pytest>=8.0.0        # Test framework
+pytest-asyncio>=0.24.0  # Async test support
 pytest-timeout>=2.3.0  # Test timeouts
 pyright>=1.1.389     # Type checking (Microsoft's PL-rigorous checker)

@@ -15,7 +15,7 @@ export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
 echo "Starting Qwen Daemon..."
 echo "  Host: ${1:-127.0.0.1}"
-echo "  Port: ${2:-8421}"
+echo "  Port: ${2:-5997}"
 echo ""
 echo "Endpoints:"
 echo "  GET  /health        - Health check"

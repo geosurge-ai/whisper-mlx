@@ -14,8 +14,10 @@ from enum import Enum
 
 # --- Core Types ---
 
+
 class ToolFunction(Protocol):
     """Protocol for tool implementations."""
+
     def __call__(self, **kwargs: Any) -> str: ...
 
 
@@ -23,13 +25,14 @@ class ToolFunction(Protocol):
 class ToolSpec:
     """
     Immutable tool specification.
-    
+
     Separates the schema (for LLM) from the implementation (for execution).
     """
+
     name: str
     description: str
     parameters: dict[str, Any]
-    
+
     def to_schema(self) -> dict[str, Any]:
         """Convert to JSON Schema format for LLM prompt injection."""
         return {
@@ -43,10 +46,11 @@ class ToolSpec:
 class AgentProfile:
     """
     Immutable agent configuration bundle.
-    
+
     Defines a specific "persona" with its system prompt, available tools,
     and inference settings.
     """
+
     name: str
     system_prompt: str
     tool_names: tuple[str, ...]  # References to tools in the registry
@@ -57,9 +61,10 @@ class AgentProfile:
 
 class ModelSize(Enum):
     """Available model sizes mapped to MLX model IDs."""
-    SMALL = "mlx-community/Qwen2.5-7B-Instruct-4bit"    # ~5GB
+
+    SMALL = "mlx-community/Qwen2.5-7B-Instruct-4bit"  # ~5GB
     MEDIUM = "mlx-community/Qwen2.5-14B-Instruct-4bit"  # ~10GB
-    LARGE = "mlx-community/Qwen3-32B-4bit"              # ~18GB
+    LARGE = "mlx-community/Qwen3-32B-4bit"  # ~18GB
 
 
 # --- System Prompts ---
@@ -130,7 +135,9 @@ CRITICAL: Use the EXACT selectors returned by browser_analyze_page! Do not guess
 - Do NOT close the browser - leave it open for the user"""
 
 
-GENERAL_ASSISTANT_PROMPT = """You are a helpful AI assistant. You answer questions clearly and concisely."""
+GENERAL_ASSISTANT_PROMPT = (
+    """You are a helpful AI assistant. You answer questions clearly and concisely."""
+)
 
 
 # --- Tool Specifications ---
@@ -143,12 +150,30 @@ MIRROR_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search term to match in issue title or description. Leave empty for all issues."},
-                "state": {"type": "string", "description": "Filter by state name (e.g., 'Todo', 'In Progress', 'Done')"},
-                "assignee": {"type": "string", "description": "Filter by assignee name (partial match)"},
-                "label": {"type": "string", "description": "Filter by label name (partial match)"},
-                "limit": {"type": "integer", "description": "Max results per page (default 10)"},
-                "page": {"type": "integer", "description": "Page number for pagination (0-indexed)"},
+                "query": {
+                    "type": "string",
+                    "description": "Search term to match in issue title or description. Leave empty for all issues.",
+                },
+                "state": {
+                    "type": "string",
+                    "description": "Filter by state name (e.g., 'Todo', 'In Progress', 'Done')",
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Filter by assignee name (partial match)",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Filter by label name (partial match)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per page (default 10)",
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Page number for pagination (0-indexed)",
+                },
             },
             "required": [],
         },
@@ -159,7 +184,10 @@ MIRROR_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "identifier": {"type": "string", "description": "The issue identifier like FE-42, NIN-123, GTM-15"},
+                "identifier": {
+                    "type": "string",
+                    "description": "The issue identifier like FE-42, NIN-123, GTM-15",
+                },
             },
             "required": ["identifier"],
         },
@@ -170,11 +198,26 @@ MIRROR_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "since_days": {"type": "integer", "description": "How many days back to look (default 7)"},
-                "event_type": {"type": "string", "description": "Filter by event type (e.g., 'state', 'assignee', 'comment')"},
-                "actor": {"type": "string", "description": "Filter by who made the change (name)"},
-                "limit": {"type": "integer", "description": "Max results per page (default 20)"},
-                "page": {"type": "integer", "description": "Page number for pagination (0-indexed)"},
+                "since_days": {
+                    "type": "integer",
+                    "description": "How many days back to look (default 7)",
+                },
+                "event_type": {
+                    "type": "string",
+                    "description": "Filter by event type (e.g., 'state', 'assignee', 'comment')",
+                },
+                "actor": {
+                    "type": "string",
+                    "description": "Filter by who made the change (name)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per page (default 20)",
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Page number for pagination (0-indexed)",
+                },
             },
             "required": [],
         },
@@ -185,10 +228,22 @@ MIRROR_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search term to match in message text"},
-                "channel": {"type": "string", "description": "Optional channel ID to limit search (e.g., C08D0GTKWLD)"},
-                "limit": {"type": "integer", "description": "Max results per page (default 10)"},
-                "page": {"type": "integer", "description": "Page number for pagination (0-indexed)"},
+                "query": {
+                    "type": "string",
+                    "description": "Search term to match in message text",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Optional channel ID to limit search (e.g., C08D0GTKWLD)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per page (default 10)",
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Page number for pagination (0-indexed)",
+                },
             },
             "required": ["query"],
         },
@@ -199,8 +254,14 @@ MIRROR_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "channel_id": {"type": "string", "description": "The Slack channel ID (e.g., C08D0GTKWLD)"},
-                "thread_ts": {"type": "string", "description": "The thread timestamp (e.g., 1700000000.123456)"},
+                "channel_id": {
+                    "type": "string",
+                    "description": "The Slack channel ID (e.g., C08D0GTKWLD)",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "The thread timestamp (e.g., 1700000000.123456)",
+                },
             },
             "required": ["channel_id", "thread_ts"],
         },
@@ -211,8 +272,15 @@ MIRROR_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "user_id_or_name": {"type": "string", "description": "User ID or name to search for"},
-                "source": {"type": "string", "enum": ["linear", "slack", "both"], "description": "Where to search: 'linear', 'slack', or 'both' (default)"},
+                "user_id_or_name": {
+                    "type": "string",
+                    "description": "User ID or name to search for",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["linear", "slack", "both"],
+                    "description": "Where to search: 'linear', 'slack', or 'both' (default)",
+                },
             },
             "required": ["user_id_or_name"],
         },
@@ -228,7 +296,10 @@ BROWSER_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query, e.g. 'Haskell online playground'"},
+                "query": {
+                    "type": "string",
+                    "description": "Search query, e.g. 'Haskell online playground'",
+                },
             },
             "required": ["query"],
         },
@@ -255,7 +326,10 @@ BROWSER_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "selector": {"type": "string", "description": "CSS selector or visible text of element to click"},
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector or visible text of element to click",
+                },
             },
             "required": ["selector"],
         },
@@ -282,7 +356,10 @@ BROWSER_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "The complete source code to paste"},
+                "code": {
+                    "type": "string",
+                    "description": "The complete source code to paste",
+                },
             },
             "required": ["code"],
         },
@@ -304,7 +381,10 @@ BROWSER_TOOL_SPECS = (
         parameters={
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "Key to press (Enter, Tab, Escape, F5, etc.)"},
+                "key": {
+                    "type": "string",
+                    "description": "Key to press (Enter, Tab, Escape, F5, etc.)",
+                },
             },
             "required": ["key"],
         },
@@ -354,4 +434,6 @@ def get_tools_for_profile(profile_name: str) -> tuple[ToolSpec, ...]:
     profile = AGENT_PROFILES.get(profile_name)
     if profile is None:
         return ()
-    return tuple(ALL_TOOL_SPECS[name] for name in profile.tool_names if name in ALL_TOOL_SPECS)
+    return tuple(
+        ALL_TOOL_SPECS[name] for name in profile.tool_names if name in ALL_TOOL_SPECS
+    )

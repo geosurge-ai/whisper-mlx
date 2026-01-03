@@ -11,4 +11,4 @@ if [[ -z "${IN_NIX_SHELL:-}" ]]; then
     exec nix develop --command "$0" "$@"
 fi
 
-python scripts/ping_daemon.py "${1:-http://127.0.0.1:8421}"
+python scripts/ping_daemon.py "${1:-http://127.0.0.1:5997}"

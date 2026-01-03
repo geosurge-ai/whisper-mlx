@@ -14,15 +14,23 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .config import AgentProfile, ToolSpec, ModelSize, AGENT_PROFILES, get_tools_for_profile
+from .config import (
+    AgentProfile,
+    ToolSpec,
+    ModelSize,
+    AGENT_PROFILES,
+    get_tools_for_profile,
+)
 from .tools import get_registry, ToolRegistry
 
 
 # --- Message Types ---
 
+
 @dataclass(frozen=True)
 class ChatMessage:
     """Immutable chat message."""
+
     role: str  # "system", "user", "assistant"
     content: str
 
@@ -30,6 +38,7 @@ class ChatMessage:
 @dataclass(frozen=True)
 class ToolCall:
     """Parsed tool call from LLM response."""
+
     name: str
     arguments: dict[str, Any]
 
@@ -37,6 +46,7 @@ class ToolCall:
 @dataclass(frozen=True)
 class ToolResult:
     """Result from tool execution."""
+
     tool_name: str
     result: str
 
@@ -44,6 +54,7 @@ class ToolResult:
 @dataclass(frozen=True)
 class ChatResponse:
     """Complete response from chat service."""
+
     content: str
     tool_calls: tuple[ToolCall, ...]
     tool_results: tuple[ToolResult, ...]
@@ -53,14 +64,15 @@ class ChatResponse:
 
 # --- Prompt Formatting (Pure Functions) ---
 
+
 def format_tools_prompt(tools: tuple[ToolSpec, ...]) -> str:
     """Format tool specs into system prompt section."""
     if not tools:
         return ""
-    
+
     schemas = [tool.to_schema() for tool in tools]
     tools_json = "\n".join(json.dumps(s) for s in schemas)
-    
+
     return f"""
 
 # Tools
@@ -87,7 +99,7 @@ def parse_tool_calls(response: str) -> list[ToolCall]:
     """Extract tool calls from LLM response."""
     pattern = r"<tool_call>\s*({.*?})\s*</tool_call>"
     matches: list[str] = re.findall(pattern, response, re.DOTALL)
-    
+
     calls: list[ToolCall] = []
     for match in matches:
         try:
@@ -97,7 +109,7 @@ def parse_tool_calls(response: str) -> list[ToolCall]:
             calls.append(ToolCall(name=name, arguments=arguments))
         except json.JSONDecodeError:
             continue
-    
+
     return calls
 
 
@@ -120,34 +132,36 @@ def format_tool_results(results: list[ToolResult]) -> str:
 
 # --- Qwen Model Singleton ---
 
+
 class QwenModel:
     """
     Singleton wrapper around MLX-LM Qwen model.
-    
+
     Loads model lazily on first inference request.
     Keeps model in memory for subsequent requests.
-    
+
     Note: MLX types are Any since mlx_lm lacks type stubs.
     """
-    
+
     _instance: QwenModel | None = None
-    
+
     def __init__(self, model_size: ModelSize = ModelSize.LARGE) -> None:
         self._model_size = model_size
         self._model: Any = None  # mlx.nn.Module (no stubs)
         self._tokenizer: Any = None  # TokenizerWrapper (no stubs)
-    
+
     @classmethod
     def get_instance(cls, model_size: ModelSize = ModelSize.LARGE) -> QwenModel:
         """Get or create singleton instance."""
         if cls._instance is None or cls._instance._model_size != model_size:
             cls._instance = cls(model_size)
         return cls._instance
-    
+
     def _ensure_loaded(self) -> tuple[Any, Any]:
         """Lazy load model and tokenizer. Returns (model, tokenizer)."""
         if self._model is None or self._tokenizer is None:
             from mlx_lm import load
+
             print(f"Loading {self._model_size.value}...")
             result = load(self._model_size.value)
             # load() returns (model, tokenizer) or (model, tokenizer, config)
@@ -155,7 +169,7 @@ class QwenModel:
             self._tokenizer = result[1]
             print("Model loaded.")
         return self._model, self._tokenizer
-    
+
     def generate(
         self,
         messages: list[dict[str, str]],
@@ -163,15 +177,16 @@ class QwenModel:
     ) -> str:
         """Generate response from messages."""
         model, tokenizer = self._ensure_loaded()
-        
+
         prompt: str = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
         )
-        
+
         # mlx_lm lacks complete type stubs; import and call within Any scope
         import mlx_lm
+
         generate_fn = getattr(mlx_lm, "generate")
         response: str = generate_fn(
             model,
@@ -181,7 +196,7 @@ class QwenModel:
             verbose=False,
         )
         return response
-    
+
     @property
     def is_loaded(self) -> bool:
         """Check if model is currently loaded."""
@@ -190,16 +205,17 @@ class QwenModel:
 
 # --- Chat Service ---
 
+
 class ChatService:
     """
     Orchestrates chat conversations with tool execution.
-    
+
     Features:
     - Profile-based configuration (system prompt, tools, settings)
     - Multi-round tool execution loop
     - Streaming-ready architecture
     """
-    
+
     def __init__(
         self,
         model: QwenModel,
@@ -207,7 +223,7 @@ class ChatService:
     ) -> None:
         self._model = model
         self._registry = registry
-    
+
     def chat(
         self,
         user_message: str,
@@ -217,13 +233,13 @@ class ChatService:
     ) -> ChatResponse:
         """
         Process a chat message with the specified agent profile.
-        
+
         Args:
             user_message: The user's input
             profile_name: Name of agent profile to use
             conversation_history: Optional prior conversation context
             verbose: Whether to print debug info
-        
+
         Returns:
             ChatResponse with final content and metadata
         """
@@ -236,46 +252,57 @@ class ChatService:
                 rounds_used=0,
                 finished=True,
             )
-        
+
         tools = get_tools_for_profile(profile_name)
         system_prompt = build_system_prompt(profile, tools)
-        
+
         # Build initial conversation
         conversation: list[ChatMessage] = list(conversation_history or [])
         conversation.append(ChatMessage("user", user_message))
-        
+
         all_tool_calls: list[ToolCall] = []
         all_tool_results: list[ToolResult] = []
         response: str = ""  # Initialize for type checker; always assigned in loop
-        
+
         for round_num in range(profile.max_tool_rounds):
             # Build messages for model
             messages = self._build_messages(system_prompt, conversation)
-            
+
             if verbose:
                 print(f"\n⏳ Round {round_num + 1} - Generating...")
-            
+
             response = self._model.generate(messages, max_tokens=profile.max_tokens)
-            
+
             if verbose:
                 preview = response[:500] + "..." if len(response) > 500 else response
-                print(f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}")
-            
+                print(
+                    f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}"
+                )
+
             # Parse tool calls
             tool_calls = parse_tool_calls(response)
-            
+
             if not tool_calls:
                 # No tool calls - return final response
                 final_content = extract_final_response(response)
-                
+
                 # Handle model stuck in thinking loop
-                if "<think>" in response and len(final_content) < 50 and round_num < 3 and tools:
+                if (
+                    "<think>" in response
+                    and len(final_content) < 50
+                    and round_num < 3
+                    and tools
+                ):
                     if verbose:
                         print("🔄 Model thinking without acting, nudging...")
                     conversation.append(ChatMessage("assistant", response))
-                    conversation.append(ChatMessage("user", "Now use your tools to help answer the question."))
+                    conversation.append(
+                        ChatMessage(
+                            "user", "Now use your tools to help answer the question."
+                        )
+                    )
                     continue
-                
+
                 return ChatResponse(
                     content=final_content,
                     tool_calls=tuple(all_tool_calls),
@@ -283,12 +310,12 @@ class ChatService:
                     rounds_used=round_num + 1,
                     finished=True,
                 )
-            
+
             if verbose:
                 print(f"🔧 Found {len(tool_calls)} tool call(s):")
                 for tc in tool_calls:
                     print(f"   - {tc.name}({tc.arguments})")
-            
+
             # Execute tools
             round_results: list[ToolResult] = []
             for tc in tool_calls:
@@ -296,17 +323,17 @@ class ChatService:
                 round_results.append(ToolResult(tc.name, result))
                 all_tool_calls.append(tc)
                 all_tool_results.append(round_results[-1])
-            
+
             if verbose:
                 print("📦 Tool results:")
                 for tr in round_results:
                     preview = tr.result[:200]
                     print(f"   - {tr.tool_name}: {preview}")
-            
+
             # Add to conversation
             conversation.append(ChatMessage("assistant", response))
             conversation.append(ChatMessage("user", format_tool_results(round_results)))
-        
+
         # Max rounds reached
         return ChatResponse(
             content=extract_final_response(response),
@@ -315,7 +342,7 @@ class ChatService:
             rounds_used=profile.max_tool_rounds,
             finished=False,  # Hit limit, might not be complete
         )
-    
+
     def _build_messages(
         self,
         system_prompt: str,
@@ -330,6 +357,7 @@ class ChatService:
 
 # --- Factory Functions ---
 
+
 def create_chat_service(model_size: ModelSize = ModelSize.LARGE) -> ChatService:
     """Create a chat service with the specified model size."""
     model = QwenModel.get_instance(model_size)
@@ -341,17 +369,21 @@ def create_chat_service(model_size: ModelSize = ModelSize.LARGE) -> ChatService:
 
 if __name__ == "__main__":
     import sys
-    
+
     model_size = ModelSize.LARGE
     if len(sys.argv) > 1:
-        size_map = {"small": ModelSize.SMALL, "medium": ModelSize.MEDIUM, "large": ModelSize.LARGE}
+        size_map = {
+            "small": ModelSize.SMALL,
+            "medium": ModelSize.MEDIUM,
+            "large": ModelSize.LARGE,
+        }
         model_size = size_map.get(sys.argv[1], ModelSize.LARGE)
-    
+
     service = create_chat_service(model_size)
-    
+
     print("Chat Service Test")
     print("=" * 40)
-    
+
     # Test general chat
     response = service.chat("What is 2 + 2?", profile_name="general", verbose=True)
     print(f"\nFinal response: {response.content}")

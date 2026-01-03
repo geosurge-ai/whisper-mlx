@@ -118,7 +118,7 @@ Keep the model loaded and serve multiple agent profiles via HTTP:
 ### Example: Chat with Profile
 
 ```bash
-curl -X POST http://127.0.0.1:8421/v1/chat \
+curl -X POST http://127.0.0.1:5997/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "message": "What is 2 + 2?",
@@ -140,7 +140,7 @@ curl -X POST http://127.0.0.1:8421/v1/chat \
 ```python
 import httpx
 
-client = httpx.Client(base_url="http://127.0.0.1:8421")
+client = httpx.Client(base_url="http://127.0.0.1:5997")
 
 # Chat with mirror profile
 response = client.post("/v1/chat", json={

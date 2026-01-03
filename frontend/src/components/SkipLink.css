@@ -1,0 +1,24 @@
+/*
+ * SkipLink Styles
+ *
+ * Hidden by default, visible on focus for keyboard users.
+ */
+
+.skip-link {
+  position: fixed;
+  top: -100px;
+  left: var(--space-4);
+  z-index: var(--z-toast);
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--color-secondary);
+  color: var(--color-text-inverse);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-md);
+  transition: top var(--transition-fast);
+}
+
+.skip-link:focus {
+  top: var(--space-4);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(29, 53, 87, 0.3);
+}

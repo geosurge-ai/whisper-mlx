@@ -17,12 +17,15 @@
         python312Packages.virtualenv
         # Media backend for Whisper
         ffmpeg
-        # Node.js for pyright
+        # Node.js + pnpm for frontend
         nodejs_22
+        nodePackages.pnpm
         # Helpful
         git
         pkg-config
       ];
+      # Note: On macOS, browser E2E tests use system Chrome/chromedriver
+      # On Linux, add chromium and chromedriver to packages above
       # Keep Python tidy/isolated
       shellHook = ''
         export PYTHONNOUSERSITE=1

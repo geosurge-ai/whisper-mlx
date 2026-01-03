@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# Run the Qwen Daemon frontend (development mode)
+#
+set -euo pipefail
+
+cd "$(dirname "$0")/frontend"
+
+# Check if node_modules exists
+if [ ! -d "node_modules" ]; then
+    echo "📦 Installing dependencies..."
+    pnpm install
+fi
+
+echo "🎨 Starting Bauhaus frontend on http://localhost:8792"
+echo "   Make sure the daemon is running: ./run-daemon"
+echo ""
+
+pnpm dev

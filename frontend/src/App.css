@@ -1,0 +1,28 @@
+/*
+ * App-level styles
+ *
+ * Minimal - most styling is in components.
+ * This file handles any app-wide overrides or utilities.
+ */
+
+/* Ensure app fills viewport */
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Print styles - hide non-essential elements */
+@media print {
+
+  .layout-header,
+  .layout-rail,
+  .layout-detail,
+  .chat-composer {
+    display: none !important;
+  }
+
+  .layout-main {
+    border: none !important;
+  }
+}
