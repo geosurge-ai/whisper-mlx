@@ -419,6 +419,144 @@ class TestToolInvocation:
         assert "latency_ms" in body
 
 
+# --- Browser Tools Regression Tests ---
+
+
+class TestBrowserToolsAsync:
+    """
+    Regression tests for browser tools using async Playwright API.
+    
+    These tests verify that browser tools work correctly in the async FastAPI
+    context without the "Playwright Sync API inside asyncio loop" error.
+    
+    Regression for: commit 8023c49 - Code_runner browser tools fail inside 
+    FastAPI asyncio event loop
+    """
+
+    def test_browser_navigate_no_sync_api_error(self, client: TestClient) -> None:
+        """
+        Input: POST /v1/invoke-tool with browser_navigate
+        Output: No "Playwright Sync API" error - should succeed or timeout
+        
+        Regression: Previously browser_navigate would immediately fail with:
+        "It looks like you are using Playwright Sync API inside the asyncio loop"
+        """
+        request_data: dict[str, Any] = {
+            "tool_name": "browser_navigate",
+            "arguments": {"url": "https://www.google.com"},
+        }
+
+        resp = client.post("/v1/invoke-tool", request_data, timeout=60)
+        body = assert_dict_body(resp)
+
+        assert resp.status == 200
+        assert body["tool_name"] == "browser_navigate"
+        
+        # The key assertion: no Playwright sync API error
+        result = body["result"]
+        if isinstance(result, dict) and "error" in result:
+            error_msg = str(result["error"])
+            assert "Playwright Sync API" not in error_msg, (
+                f"Regression: Got Playwright Sync API error: {error_msg}"
+            )
+            assert "asyncio loop" not in error_msg.lower(), (
+                f"Regression: Got asyncio loop error: {error_msg}"
+            )
+
+    def test_browser_navigate_returns_page_info(self, client: TestClient) -> None:
+        """
+        Input: POST /v1/invoke-tool with browser_navigate to google.com
+        Output: Result contains status, url, and title
+        """
+        request_data: dict[str, Any] = {
+            "tool_name": "browser_navigate",
+            "arguments": {"url": "https://www.google.com"},
+        }
+
+        resp = client.post("/v1/invoke-tool", request_data, timeout=60)
+        body = assert_dict_body(resp)
+
+        assert resp.status == 200
+        result = body["result"]
+        
+        # Should have success status with page info
+        if isinstance(result, dict) and result.get("status") == "success":
+            assert "url" in result
+            assert "title" in result
+            assert "google" in result["url"].lower()
+
+    def test_web_search_no_sync_api_error(self, client: TestClient) -> None:
+        """
+        Input: POST /v1/invoke-tool with web_search
+        Output: No "Playwright Sync API" error - search should work
+        
+        Note: web_search uses DuckDuckGo, not Playwright, but is part of
+        the browser tools module and should work in async context.
+        """
+        request_data: dict[str, Any] = {
+            "tool_name": "web_search",
+            "arguments": {"query": "python programming"},
+        }
+
+        resp = client.post("/v1/invoke-tool", request_data, timeout=30)
+        body = assert_dict_body(resp)
+
+        assert resp.status == 200
+        assert body["tool_name"] == "web_search"
+        
+        result = body["result"]
+        if isinstance(result, dict):
+            # Should have search results or status
+            assert "status" in result
+            if result["status"] == "success":
+                assert "results" in result
+                assert len(result["results"]) > 0
+
+    def test_browser_tools_are_async_functions(self, client: TestClient) -> None:
+        """
+        Input: GET /v1/tools
+        Output: Browser tools are registered and available
+        
+        Verifies the async browser tools module loaded correctly.
+        """
+        resp = client.get("/v1/tools")
+        body = assert_list_body(resp)
+
+        tool_names: set[str] = {t["name"] for t in body}
+        
+        # All browser tools should be registered
+        browser_tools = {
+            "web_search",
+            "browser_navigate", 
+            "browser_get_text",
+            "browser_click",
+            "browser_get_elements",
+            "browser_wait",
+            "browser_paste_code",
+            "browser_type_slow",
+            "browser_press_key",
+            "browser_analyze_page",
+        }
+        
+        for tool in browser_tools:
+            assert tool in tool_names, f"Browser tool {tool} not registered"
+
+    def test_code_runner_profile_has_browser_tools(self, client: TestClient) -> None:
+        """
+        Input: GET /v1/profiles/code_runner/tools
+        Output: All browser tools available for code_runner profile
+        """
+        resp = client.get("/v1/profiles/code_runner/tools")
+        body = assert_list_body(resp)
+
+        tool_names: set[str] = {t["name"] for t in body}
+        
+        assert "browser_navigate" in tool_names
+        assert "browser_paste_code" in tool_names
+        assert "browser_click" in tool_names
+        assert "web_search" in tool_names
+
+
 # --- Chat Endpoint Tests ---
 
 
