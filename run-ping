@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Smoke test the Qwen daemon
+# Usage: ./run-ping [host:port]
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+# Ensure we're in nix shell with dependencies
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+    exec nix develop --command "$0" "$@"
+fi
+
+python scripts/ping_daemon.py "${1:-http://127.0.0.1:8421}"

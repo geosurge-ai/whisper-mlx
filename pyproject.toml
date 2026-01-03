@@ -1,0 +1,74 @@
+[project]
+name = "whisper-mlx"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.pyright]
+# Use strictest type checking mode
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+
+# All strict checks enabled
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true
+strictParameterNoneValue = true
+
+# Report all categories of errors
+reportMissingImports = "warning"  # External libs may not be installed during CI
+reportMissingTypeStubs = "warning"
+reportUnusedImport = "error"
+reportUnusedClass = "error"
+reportUnusedFunction = "error"
+reportUnusedVariable = "error"
+reportDuplicateImport = "error"
+reportPrivateUsage = "error"
+reportConstantRedefinition = "error"
+reportIncompatibleMethodOverride = "error"
+reportIncompatibleVariableOverride = "error"
+reportInconsistentConstructor = "error"
+reportOverlappingOverload = "error"
+reportUninitializedInstanceVariable = "error"
+reportInvalidStringEscapeSequence = "error"
+reportUnknownParameterType = "error"
+reportUnknownArgumentType = "error"
+reportUnknownLambdaType = "error"
+reportUnknownVariableType = "error"
+reportUnknownMemberType = "error"
+reportMissingParameterType = "error"
+reportMissingTypeArgument = "error"
+reportCallInDefaultInitializer = "error"
+reportUnnecessaryIsInstance = "warning"
+reportUnnecessaryCast = "warning"
+reportUnnecessaryComparison = "warning"
+reportUnnecessaryContains = "warning"
+reportAssertAlwaysTrue = "error"
+reportSelfClsParameterName = "error"
+reportImplicitStringConcatenation = "warning"
+reportUndefinedVariable = "error"
+reportUnboundVariable = "error"
+reportInvalidStubStatement = "error"
+reportIncompleteStub = "warning"
+reportUnsupportedDunderAll = "error"
+reportUnusedExpression = "error"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportMatchNotExhaustive = "error"
+
+# Paths
+include = ["daemon", "tests", "scripts"]
+exclude = ["**/__pycache__", ".venv"]
+
+# Ignore type errors from external libraries without stubs
+# These are runtime-only; our code is still strictly checked
+extraPaths = []
+executionEnvironments = [
+    { root = "daemon", extraPaths = ["."] },
+    { root = "tests", extraPaths = ["."] },
+    { root = "scripts", extraPaths = ["."] }
+]
+
+
+[tool.pytest.ini_options]
+addopts = "-v --tb=short"
+testpaths = ["tests"]
+timeout = 180

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Mirror Knowledge Agent: Query Linear issues and Slack conversations with Qwen
+#
+# Usage:
+#   ./run-mirror [model_size]
+#
+# Model sizes:
+#   small  - Qwen2.5-7B  (~5GB RAM)  - fastest
+#   medium - Qwen2.5-14B (~10GB RAM) - balanced  
+#   large  - Qwen3-32B   (~18GB RAM) - most capable (default)
+#
+# Environment variables:
+#   LINEAR_MIRROR_DIR         - Path to Linear mirror (default: ~/Github/vibe-os/linear_mirror)
+#   VIBEOS_SLACK_MIRROR_DIR   - Path to Slack mirror (default: ~/Github/vibe-os/slack_mirror)
+
+set -e
+
+cd "$(dirname "$0")"
+source .venv/bin/activate
+
+export TOKENIZERS_PARALLELISM=false
+
+python mirror_agent.py "$@"

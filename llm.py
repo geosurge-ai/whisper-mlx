@@ -257,21 +257,32 @@ class ToolCallingAgent:
 
         for round_num in range(self.max_tool_rounds):
             messages = build_messages(system_prompt, conversation)
+            if verbose:
+                print(f"\n⏳ Round {round_num + 1} - Generating...", flush=True)
             response = self.engine.generate(messages)
 
             if verbose:
-                print(f"\n🔄 Round {round_num + 1} - LLM Response:")
-                print("-" * 40)
-                print(response[:500] + "..." if len(response) > 500 else response)
-                print("-" * 40)
+                print(f"✅ Round {round_num + 1} - LLM Response:", flush=True)
+                print("-" * 40, flush=True)
+                print(response[:500] + "..." if len(response) > 500 else response, flush=True)
+                print("-" * 40, flush=True)
 
             # Check for tool calls
             tool_calls = parse_tool_calls(response)
             if not tool_calls:
+                cleaned = extract_final_response(response)
+                
+                # Check if model got stuck in a <think> loop without acting
+                if "<think>" in response and len(cleaned) < 50 and round_num < 3:
+                    if verbose:
+                        print("🔄 Model thinking without acting, nudging...")
+                    conversation.append(Message("assistant", response))
+                    conversation.append(Message("user", "Now use your tools. Start with web_search or browser_navigate."))
+                    continue
+                
                 if verbose:
                     print("📭 No tool calls found, returning final response.")
-                # No more tool calls, return final response
-                return extract_final_response(response)
+                return cleaned
 
             if verbose:
                 print(f"🔧 Found {len(tool_calls)} tool call(s):")

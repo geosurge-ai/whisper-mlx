@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Run end-to-end tests for Qwen daemon
+# Usage: ./run-tests [pytest args...]
+#
+# Examples:
+#   ./run-tests                    # Run all tests
+#   ./run-tests -v                 # Verbose output
+#   ./run-tests -k "health"        # Run only health tests
+#   ./run-tests --tb=long          # Long tracebacks
+#   ./run-tests -x                 # Stop on first failure
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+# Ensure we're in nix shell with dependencies
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+    exec nix develop --command "$0" "$@"
+fi
+
+export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
+
+echo "Running Qwen Daemon E2E Tests"
+echo "=============================="
+echo ""
+
+pytest tests/test_daemon_e2e.py "$@"

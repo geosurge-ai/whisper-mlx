@@ -17,6 +17,8 @@
         python312Packages.virtualenv
         # Media backend for Whisper
         ffmpeg
+        # Node.js for pyright
+        nodejs_22
         # Helpful
         git
         pkg-config

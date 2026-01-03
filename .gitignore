@@ -7,7 +7,6 @@
 .envrc
 .cache/
 .envrc-local
-# Nix store paths (if any)
 /.nix-channels
 /nix/
 *.drv
@@ -34,21 +33,18 @@ pytest_cache/
 .coverage
 coverage.xml
 htmlcov/
-*.log
 
 # --- Whisper / MLX artefacts ---
-# Transcripts and temporary audio conversions
-*.wav
-*.mp3
-*.m4a
-*.mp4
-*.mov
-*.flac
-*.ogg
-*.srt
-*.vtt
-*.json
-*.txt
+# Transcripts and temporary audio conversions (in project root only)
+/*.wav
+/*.mp3
+/*.m4a
+/*.mp4
+/*.mov
+/*.flac
+/*.ogg
+/*.srt
+/*.vtt
 
 # Model checkpoints or converted weights
 mlx_models/
@@ -69,11 +65,11 @@ Icon?
 Thumbs.db
 Desktop.ini
 
-# --- Miscellaneous ---
+# --- Logs ---
+*.log
 logs/
+
+# --- Miscellaneous ---
 tmp/
 scratch/
 notes/
-
-/result
-/.direnv

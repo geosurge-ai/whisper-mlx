@@ -93,23 +93,98 @@ Qwen3 (April 2025) is currently the most capable open-source tool-calling LLM:
 - Excellent function calling via Hermes-style XML format
 - Runs efficiently on Apple Silicon via MLX
 
+## Qwen Daemon (Unified API Server)
+
+Keep the model loaded and serve multiple agent profiles via HTTP:
+
+```bash
+# Start the daemon (loads model on first request)
+./run-daemon
+
+# In another terminal, run smoke tests
+./run-ping
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check and model status |
+| `/v1/chat` | POST | Chat completion with profile/tools |
+| `/v1/invoke-tool` | POST | Direct tool execution |
+| `/v1/profiles` | GET | List available agent profiles |
+| `/v1/tools` | GET | List available tools |
+
+### Example: Chat with Profile
+
+```bash
+curl -X POST http://127.0.0.1:8421/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "What is 2 + 2?",
+    "profile": "general",
+    "model_size": "large"
+  }'
+```
+
+### Available Profiles
+
+| Profile | Tools | Use Case |
+|---------|-------|----------|
+| `general` | None | Simple chat without tools |
+| `mirror` | Linear/Slack | Query team knowledge base |
+| `code_runner` | Browser/Web | Find & run code in playgrounds |
+
+### Python Client Example
+
+```python
+import httpx
+
+client = httpx.Client(base_url="http://127.0.0.1:8421")
+
+# Chat with mirror profile
+response = client.post("/v1/chat", json={
+    "message": "What issues are in progress?",
+    "profile": "mirror",
+    "model_size": "large",
+})
+print(response.json()["content"])
+```
+
 ## Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐
-│   Whisper    │     │    Qwen3     │
-│  (Speech)    │     │   (Tools)    │
-└──────┬───────┘     └──────┬───────┘
-       │                    │
-       └────────┬───────────┘
-                │
-         ┌──────▼──────┐
-         │     MLX     │
-         │  Framework  │
-         └──────┬──────┘
-                │
-         ┌──────▼──────┐
-         │   Apple     │
-         │  Silicon    │
-         └─────────────┘
+                    ┌─────────────────────────────────────┐
+                    │          Qwen Daemon                │
+                    │     (FastAPI + Singleton Model)     │
+                    ├─────────────────────────────────────┤
+                    │  /v1/chat    /v1/invoke-tool        │
+                    │  /v1/profiles  /v1/tools  /health   │
+                    └──────────────────┬──────────────────┘
+                                       │
+        ┌──────────────────────────────┼──────────────────────────────┐
+        │                              │                              │
+┌───────▼────────┐          ┌─────────▼─────────┐          ┌─────────▼─────────┐
+│  AgentProfile  │          │   ToolRegistry    │          │   QwenModel       │
+│  (prompts)     │          │   (executors)     │          │   (singleton)     │
+└───────┬────────┘          └─────────┬─────────┘          └─────────┬─────────┘
+        │                             │                              │
+        │     ┌───────────────────────┴───────────────────────┐      │
+        │     │                                               │      │
+        │  ┌──▼───────────┐                         ┌─────────▼──┐   │
+        │  │ Mirror Tools │                         │Browser Tools│  │
+        │  │ (Linear/Slack)│                        │ (Playwright)│  │
+        │  └──────────────┘                         └─────────────┘  │
+        │                                                            │
+        └────────────────────────────┬───────────────────────────────┘
+                                     │
+                              ┌──────▼──────┐
+                              │     MLX     │
+                              │  Framework  │
+                              └──────┬──────┘
+                                     │
+                              ┌──────▼──────┐
+                              │   Apple     │
+                              │  Silicon    │
+                              └─────────────┘
 ```

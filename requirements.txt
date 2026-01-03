@@ -1,0 +1,20 @@
+# Qwen Daemon Dependencies
+# Install: pip install -r requirements.txt
+
+# Core LLM
+mlx-lm>=0.19.0
+
+# API Server
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.0.0
+
+# Existing agent dependencies
+ddgs>=6.0.0          # DuckDuckGo search (code_runner_agent)
+playwright>=1.40.0    # Browser automation (code_runner_agent)
+
+# Development & Testing
+httpx>=0.27.0        # For async client testing
+pytest>=8.0.0        # Test framework
+pytest-timeout>=2.3.0  # Test timeouts
+pyright>=1.1.389     # Type checking (Microsoft's PL-rigorous checker)

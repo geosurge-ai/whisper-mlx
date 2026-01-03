@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Run the Qwen daemon server
+# Usage: ./run-daemon [--host HOST] [--port PORT]
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+# Ensure we're in nix shell with dependencies
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+    exec nix develop --command "$0" "$@"
+fi
+
+export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
+
+echo "Starting Qwen Daemon..."
+echo "  Host: ${1:-127.0.0.1}"
+echo "  Port: ${2:-8421}"
+echo ""
+echo "Endpoints:"
+echo "  GET  /health        - Health check"
+echo "  POST /v1/chat       - Chat completion"
+echo "  POST /v1/invoke-tool - Direct tool invocation"
+echo "  GET  /v1/profiles   - List profiles"
+echo "  GET  /v1/tools      - List tools"
+echo ""
+
+python -m daemon.server "$@"

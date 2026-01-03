@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Run code in any language using Qwen as the agent
+#
+# Usage:
+#   ./run-code <language> [program_description] [model_size]
+#
+# Examples:
+#   ./run-code python                     # FizzBuzz in Python
+#   ./run-code rust "hello world"         # Hello World in Rust
+#   ./run-code haskell "quicksort" medium # Quicksort in Haskell with 14B model
+#
+# Model sizes:
+#   small  - Qwen2.5-7B  (~5GB RAM)  - fastest
+#   medium - Qwen2.5-14B (~10GB RAM) - balanced
+#   large  - Qwen3-32B   (~18GB RAM) - most capable
+
+set -e
+
+cd "$(dirname "$0")"
+source .venv/bin/activate
+
+export TOKENIZERS_PARALLELISM=false
+
+if [ $# -lt 1 ]; then
+    echo "Usage: ./run-code <language> [program_description] [model_size]"
+    echo ""
+    echo "Examples:"
+    echo "  ./run-code python"
+    echo "  ./run-code rust 'hello world'"
+    echo "  ./run-code javascript 'fibonacci sequence'"
+    echo "  ./run-code haskell 'quicksort' medium"
+    exit 1
+fi
+
+python code_runner_agent.py "$@"
