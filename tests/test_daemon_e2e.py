@@ -19,11 +19,11 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Generator
+from typing import Any, Generator
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 
 
 # --- Configuration ---
@@ -129,7 +129,7 @@ def is_port_free(port: int) -> bool:
 
 # --- Fixtures ---
 
-@pytest.fixture(scope="module")  # pyright: ignore[reportUntypedFunctionDecorator,reportUnknownMemberType]
+@pytest.fixture(scope="module")
 def daemon_process() -> Generator[subprocess.Popen[bytes], None, None]:
     """
     Start daemon server for the test module.
@@ -145,7 +145,7 @@ def daemon_process() -> Generator[subprocess.Popen[bytes], None, None]:
     """
     # Ensure port is free
     if not is_port_free(DAEMON_PORT):
-        pytest.skip(f"Port {DAEMON_PORT} is already in use")  # pyright: ignore[reportUnknownMemberType]
+        pytest.skip(f"Port {DAEMON_PORT} is already in use")
     
     # Build command
     project_root = Path(__file__).parent.parent
@@ -173,7 +173,7 @@ def daemon_process() -> Generator[subprocess.Popen[bytes], None, None]:
         # Capture output for debugging
         proc.terminate()
         stdout, _ = proc.communicate(timeout=5)
-        pytest.fail(f"Daemon failed to start. Output:\n{stdout.decode()}")  # pyright: ignore[reportUnknownMemberType]
+        pytest.fail(f"Daemon failed to start. Output:\n{stdout.decode()}")
     
     print("[SETUP] Daemon is ready")
     yield proc
@@ -190,7 +190,7 @@ def daemon_process() -> Generator[subprocess.Popen[bytes], None, None]:
         proc.wait()
 
 
-@pytest.fixture  # pyright: ignore[reportUntypedFunctionDecorator,reportUnknownMemberType]
+@pytest.fixture
 def client(daemon_process: subprocess.Popen[bytes]) -> TestClient:
     """
     Provide HTTP client bound to the running daemon.
@@ -206,13 +206,16 @@ def client(daemon_process: subprocess.Popen[bytes]) -> TestClient:
 def assert_dict_body(resp: HttpResponse) -> dict[str, Any]:
     """Assert response body is a dict and return it typed."""
     assert isinstance(resp.body, dict), f"Expected dict body, got {type(resp.body)}"
-    return resp.body
+    body: dict[str, Any] = resp.body
+    return body
 
 
-def assert_list_body(resp: HttpResponse) -> list[Any]:
-    """Assert response body is a list and return it typed."""
+def assert_list_body(resp: HttpResponse) -> list[dict[str, Any]]:
+    """Assert response body is a list of dicts and return it typed."""
     assert isinstance(resp.body, list), f"Expected list body, got {type(resp.body)}"
-    return resp.body
+    # All our list endpoints return list of dicts - cast the type
+    result: list[dict[str, Any]] = resp.body  
+    return result
 
 
 # --- Health Endpoint Tests ---
@@ -255,8 +258,7 @@ class TestHealthEndpoint:
         body = assert_dict_body(resp)
         
         assert "available_tools" in body
-        tools = body["available_tools"]
-        assert isinstance(tools, list)
+        tools: list[str] = body["available_tools"]
         assert len(tools) > 0
 
 
@@ -285,7 +287,6 @@ class TestProfilesEndpoint:
         body = assert_list_body(resp)
         
         for profile in body:
-            assert isinstance(profile, dict)
             assert "name" in profile
             assert "system_prompt_preview" in profile
             assert "tool_names" in profile
@@ -299,7 +300,10 @@ class TestProfilesEndpoint:
         resp = client.get("/v1/profiles")
         body = assert_list_body(resp)
         
-        general = next((p for p in body if isinstance(p, dict) and p.get("name") == "general"), None)
+        general: dict[str, Any] | None = next(
+            (p for p in body if p.get("name") == "general"),
+            None
+        )
         assert general is not None
         assert general["tool_names"] == []
     
@@ -311,9 +315,12 @@ class TestProfilesEndpoint:
         resp = client.get("/v1/profiles")
         body = assert_list_body(resp)
         
-        mirror = next((p for p in body if isinstance(p, dict) and p.get("name") == "mirror"), None)
+        mirror: dict[str, Any] | None = next(
+            (p for p in body if p.get("name") == "mirror"),
+            None
+        )
         assert mirror is not None
-        tool_names = mirror["tool_names"]
+        tool_names: list[str] = mirror["tool_names"]
         assert "search_linear_issues" in tool_names
         assert "get_slack_thread" in tool_names
 
@@ -343,7 +350,6 @@ class TestToolsEndpoint:
         body = assert_list_body(resp)
         
         for tool in body:
-            assert isinstance(tool, dict)
             assert "name" in tool
             assert "description" in tool
             assert "parameters" in tool
@@ -357,7 +363,7 @@ class TestToolsEndpoint:
         body = assert_list_body(resp)
         
         assert resp.status == 200
-        tool_names = [t["name"] for t in body if isinstance(t, dict)]
+        tool_names: list[str] = [t["name"] for t in body]
         assert "search_linear_issues" in tool_names
         assert "web_search" not in tool_names  # browser tool, not mirror
 
@@ -377,9 +383,9 @@ class TestToolInvocation:
             "arguments": {},
         }
         
-        with pytest.raises(URLError) as exc_info:  # pyright: ignore[reportUnknownMemberType]
+        with pytest.raises(URLError) as exc_info:
             client.post("/v1/invoke-tool", request_data)
-        assert "404" in str(exc_info.value)  # pyright: ignore[reportUnknownMemberType]
+        assert "404" in str(exc_info.value)
     
     def test_invoke_tool_returns_result(self, client: TestClient) -> None:
         """
@@ -415,9 +421,9 @@ class TestChatEndpoint:
             "profile": "nonexistent_profile",
         }
         
-        with pytest.raises(URLError) as exc_info:  # pyright: ignore[reportUnknownMemberType]
+        with pytest.raises(URLError) as exc_info:
             client.post("/v1/chat", request_data)
-        assert "400" in str(exc_info.value)  # pyright: ignore[reportUnknownMemberType]
+        assert "400" in str(exc_info.value)
     
     def test_chat_invalid_model_size_returns_400(self, client: TestClient) -> None:
         """
@@ -430,9 +436,9 @@ class TestChatEndpoint:
             "model_size": "invalid_size",
         }
         
-        with pytest.raises(URLError) as exc_info:  # pyright: ignore[reportUnknownMemberType]
+        with pytest.raises(URLError) as exc_info:
             client.post("/v1/chat", request_data)
-        assert "400" in str(exc_info.value)  # pyright: ignore[reportUnknownMemberType]
+        assert "400" in str(exc_info.value)
     
     def test_chat_response_has_required_fields(self, client: TestClient) -> None:
         """
@@ -526,7 +532,7 @@ class TestIntegration:
         """
         tools_resp = client.get("/v1/profiles/mirror/tools")
         tools_body = assert_list_body(tools_resp)
-        tool_names = {t["name"] for t in tools_body if isinstance(t, dict)}
+        tool_names: set[str] = {t["name"] for t in tools_body}
         
         assert "search_linear_issues" in tool_names
         assert "list_linear_events" in tool_names
@@ -577,4 +583,4 @@ class TestPerformance:
 # --- CLI Entry Point ---
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])  # pyright: ignore[reportUnknownMemberType]
+    pytest.main([__file__, "-v", "--tb=short"])

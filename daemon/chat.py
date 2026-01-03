@@ -12,14 +12,10 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from .config import AgentProfile, ToolSpec, ModelSize, AGENT_PROFILES, get_tools_for_profile
 from .tools import get_registry, ToolRegistry
-
-if TYPE_CHECKING:
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
-    from mlx.nn import Module
 
 
 # --- Message Types ---
@@ -90,16 +86,15 @@ def build_system_prompt(profile: AgentProfile, tools: tuple[ToolSpec, ...]) -> s
 def parse_tool_calls(response: str) -> list[ToolCall]:
     """Extract tool calls from LLM response."""
     pattern = r"<tool_call>\s*({.*?})\s*</tool_call>"
-    matches = re.findall(pattern, response, re.DOTALL)
+    matches: list[str] = re.findall(pattern, response, re.DOTALL)
     
-    calls = []
+    calls: list[ToolCall] = []
     for match in matches:
         try:
-            data = json.loads(match)
-            calls.append(ToolCall(
-                name=data.get("name", ""),
-                arguments=data.get("arguments", {}),
-            ))
+            data: dict[str, Any] = json.loads(match)
+            name: str = data.get("name", "")
+            arguments: dict[str, Any] = data.get("arguments", {})
+            calls.append(ToolCall(name=name, arguments=arguments))
         except json.JSONDecodeError:
             continue
     
@@ -131,14 +126,16 @@ class QwenModel:
     
     Loads model lazily on first inference request.
     Keeps model in memory for subsequent requests.
+    
+    Note: MLX types are Any since mlx_lm lacks type stubs.
     """
     
     _instance: QwenModel | None = None
     
     def __init__(self, model_size: ModelSize = ModelSize.LARGE) -> None:
         self._model_size = model_size
-        self._model: Module | None = None
-        self._tokenizer: TokenizerWrapper | None = None
+        self._model: Any = None  # mlx.nn.Module (no stubs)
+        self._tokenizer: Any = None  # TokenizerWrapper (no stubs)
     
     @classmethod
     def get_instance(cls, model_size: ModelSize = ModelSize.LARGE) -> QwenModel:
@@ -147,8 +144,8 @@ class QwenModel:
             cls._instance = cls(model_size)
         return cls._instance
     
-    def _ensure_loaded(self) -> tuple[Module, TokenizerWrapper]:
-        """Lazy load model and tokenizer. Returns the loaded model and tokenizer."""
+    def _ensure_loaded(self) -> tuple[Any, Any]:
+        """Lazy load model and tokenizer. Returns (model, tokenizer)."""
         if self._model is None or self._tokenizer is None:
             from mlx_lm import load
             print(f"Loading {self._model_size.value}...")
@@ -166,7 +163,6 @@ class QwenModel:
     ) -> str:
         """Generate response from messages."""
         model, tokenizer = self._ensure_loaded()
-        from mlx_lm import generate
         
         prompt: str = tokenizer.apply_chat_template(
             messages,
@@ -174,7 +170,10 @@ class QwenModel:
             add_generation_prompt=True,
         )
         
-        response: str = generate(
+        # mlx_lm lacks complete type stubs; import and call within Any scope
+        import mlx_lm
+        generate_fn = getattr(mlx_lm, "generate")
+        response: str = generate_fn(
             model,
             tokenizer,
             prompt=prompt,

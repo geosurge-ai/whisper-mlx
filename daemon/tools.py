@@ -61,9 +61,8 @@ class ToolRegistry:
             return json.dumps({"error": f"Unknown tool: {name}"})
         
         try:
-            result = tool(**arguments)
-            # Ensure result is a string
-            return result if isinstance(result, str) else json.dumps(result)
+            result: str = tool(**arguments)
+            return result
         except Exception as e:
             return json.dumps({"error": f"Tool execution failed: {str(e)}"})
     
@@ -101,7 +100,7 @@ def _create_mirror_tools_loader() -> ToolLoader:
         # Import mirror_agent to get implementations
         # We do this lazily to avoid loading data until needed
         try:
-            from mirror_agent import (  # pyright: ignore[reportMissingImports]
+            from mirror_agent import (
                 search_linear_issues,
                 get_linear_issue,
                 list_linear_events,
@@ -142,7 +141,7 @@ def _create_browser_tools_loader() -> ToolLoader:
             return _cache
         
         try:
-            from code_runner_agent import (  # pyright: ignore[reportMissingImports]
+            from code_runner_agent import (
                 web_search,
                 browser_navigate,
                 browser_get_text,

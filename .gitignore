@@ -73,3 +73,6 @@ logs/
 tmp/
 scratch/
 notes/
+
+*.txt
+!requirements.txt

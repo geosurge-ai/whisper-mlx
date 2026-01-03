@@ -20,9 +20,12 @@ from __future__ import annotations
 import json
 import sys
 import time
-from typing import Any
+from typing import Any, Callable, cast
 from urllib.request import urlopen, Request
 from urllib.error import URLError
+
+# Type alias for test functions
+TestFunction = Callable[[str], bool]
 
 
 def request(method: str, url: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -61,19 +64,8 @@ def test_health(base_url: str) -> bool:
 def test_profiles(base_url: str) -> bool:
     """Test profiles endpoint."""
     print("\n2. Testing /v1/profiles...")
-    result = request("GET", f"{base_url}/v1/profiles")
     
-    if isinstance(result, dict) and "error" in result:
-        print(f"   ❌ Failed: {result['error']}")
-        return False
-    
-    # Result should be a list when converted from the response
-    profiles_result = request("GET", f"{base_url}/v1/profiles")
-    if "error" in profiles_result:
-        print(f"   ❌ Failed: {profiles_result['error']}")
-        return False
-    
-    # For list responses, we need to handle differently
+    # For list responses, we need to fetch directly since request() returns dict
     try:
         with urlopen(Request(f"{base_url}/v1/profiles", method="GET"), timeout=120) as resp:
             profiles: list[dict[str, Any]] = json.loads(resp.read().decode())
@@ -150,7 +142,9 @@ def test_tool_invoke(base_url: str) -> bool:
     print(f"   ✅ Latency: {result.get('latency_ms', 0):.0f}ms")
     tool_result = result.get("result")
     if isinstance(tool_result, dict):
-        print(f"   ✅ Result keys: {list(tool_result.keys())}")
+        # Cast to typed dict to get properly typed keys
+        typed_result = cast(dict[str, Any], tool_result)
+        print(f"   ✅ Result keys: {list(typed_result.keys())}")
     return True
 
 
@@ -174,13 +168,13 @@ def test_mirror_chat(base_url: str) -> bool:
     
     content = str(result.get("content", ""))[:200]
     print(f"   ✅ Response: {content}...")
-    tool_calls = result.get("tool_calls", [])
+    tool_calls: list[dict[str, Any]] = result.get("tool_calls", [])
     print(f"   ✅ Tool calls: {len(tool_calls)}")
     if tool_calls:
         for tc in tool_calls[:3]:
-            if isinstance(tc, dict):
-                args = tc.get("arguments", {})
-                print(f"      - {tc.get('name')}({list(args.keys()) if isinstance(args, dict) else args})")
+            args: dict[str, Any] = tc.get("arguments", {})
+            arg_keys = list(args.keys())
+            print(f"      - {tc.get('name')}({arg_keys})")
     print(f"   ✅ Rounds: {result.get('rounds_used')}, Finished: {result.get('finished')}")
     print(f"   ✅ Latency: {result.get('latency_ms', 0):.0f}ms (total: {elapsed:.1f}s)")
     return True
@@ -194,7 +188,7 @@ def main() -> int:
     print("=" * 60)
     print(f"Target: {base_url}")
     
-    tests: list[tuple[str, object]] = [
+    tests: list[tuple[str, TestFunction]] = [
         ("Health check", test_health),
         ("Profile listing", test_profiles),
         ("Tool listing", test_tools),
@@ -208,7 +202,7 @@ def main() -> int:
     
     for _, test_fn in tests:
         try:
-            if callable(test_fn) and test_fn(base_url):  # pyright: ignore[reportUnknownArgumentType]
+            if test_fn(base_url):
                 passed += 1
             else:
                 failed += 1
