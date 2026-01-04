@@ -5,7 +5,7 @@
  * Sessions are stored on the backend, localStorage serves as cache.
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, startTransition } from 'react'
 import { useLocalStorage } from './useLocalStorage'
 import type { ProfileInfo, ToolInfo, Session, SessionSummary, SessionMessage } from '../api'
 import {
@@ -93,8 +93,15 @@ export function useAppState() {
 
   // Check connection on mount
   useEffect(() => {
+    let isInitialCheck = true
+
     async function checkConnection() {
-      setConnectionStatus('checking')
+      // Only show 'checking' on initial load, not on periodic checks
+      // This prevents re-triggering effects that depend on connectionStatus
+      if (isInitialCheck) {
+        setConnectionStatus('checking')
+        isInitialCheck = false
+      }
       try {
         const health = await getHealth()
         debug(`Health check: model_loaded=${health.model_loaded}, generating=${health.generation_in_progress}`)
@@ -184,12 +191,12 @@ export function useAppState() {
     void fetchTools()
   }, [connectionStatus, selectedProfile])
 
-  // Fetch sessions from backend when online
+  // Fetch sessions from backend when online (initial load only)
   useEffect(() => {
     if (connectionStatus !== 'online') return
 
     async function fetchSessions() {
-      debug('Fetching sessions from backend...')
+      debug('Fetching sessions from backend (initial)...')
       setSessionsLoading(true)
       try {
         const data = await listSessions()
@@ -210,6 +217,20 @@ export function useAppState() {
     void fetchSessions()
   }, [connectionStatus])
 
+  // Helper to refresh sessions in background (no loading state, uses transition)
+  const refreshSessionsInBackground = useCallback(async () => {
+    if (connectionStatus !== 'online') return
+    try {
+      const data = await listSessions()
+      // Use startTransition to mark this as non-urgent update
+      startTransition(() => {
+        setSessions(data)
+      })
+    } catch (error) {
+      console.error('Failed to refresh sessions:', error)
+    }
+  }, [connectionStatus])
+
   // Refresh sessions when generation completes
   useEffect(() => {
     // Detect transition from generating to not generating
@@ -218,21 +239,10 @@ export function useAppState() {
 
     if (wasGenerating && !generationInProgress && connectionStatus === 'online') {
       // Generation just completed - refresh session list to update message counts
-      debug('Generation completed, refreshing sessions...')
-      void (async () => {
-        try {
-          const data = await listSessions()
-          debug(`Sessions refreshed: ${data.length} sessions`, data.map(s => ({
-            id: s.id.slice(0, 8),
-            messages: s.message_count
-          })))
-          setSessions(data)
-        } catch (error) {
-          console.error('Failed to refresh sessions:', error)
-        }
-      })()
+      debug('Generation completed, refreshing sessions in background...')
+      void refreshSessionsInBackground()
     }
-  }, [generationInProgress, connectionStatus])
+  }, [generationInProgress, connectionStatus, refreshSessionsInBackground])
 
   // Load current session from backend when ID changes
   useEffect(() => {
@@ -268,16 +278,15 @@ export function useAppState() {
         const session = await apiCreateSession({ profile_name: selectedProfile })
         setCurrentSessionId(session.id)
         setCurrentSession(session)
-        // Refresh sessions list
-        const data = await listSessions()
-        setSessions(data)
+        // Refresh sessions list in background
+        void refreshSessionsInBackground()
       } catch (error) {
         console.error('Failed to create initial session:', error)
       }
     }
 
     void createInitialSession()
-  }, [connectionStatus, currentSessionId, selectedProfile, sessionsLoading, setCurrentSessionId])
+  }, [connectionStatus, currentSessionId, selectedProfile, sessionsLoading, setCurrentSessionId, refreshSessionsInBackground])
 
   // Global keyboard shortcut for command palette
   useEffect(() => {
@@ -299,22 +308,35 @@ export function useAppState() {
     setSelectedProfile(name)
     setChatError(null)
 
-    // Create new session for new profile
     if (connectionStatus === 'online') {
       try {
-        debug(`Creating new session for profile ${name}...`)
-        const session = await apiCreateSession({ profile_name: name })
-        debug(`Created session: ${session.id.slice(0, 8)}`)
-        setCurrentSessionId(session.id)
-        setCurrentSession(session)
-        // Refresh sessions list
-        const data = await listSessions()
-        setSessions(data)
+        // First, check if there's already an empty session for this profile
+        // This prevents "Untitled session" accumulation when switching profiles rapidly
+        const existingEmptySession = sessions.find(
+          s => s.profile_name === name && s.message_count === 0
+        )
+
+        if (existingEmptySession) {
+          // Reuse existing empty session
+          debug(`Reusing existing empty session: ${existingEmptySession.id.slice(0, 8)}`)
+          const session = await apiGetSession(existingEmptySession.id)
+          setCurrentSessionId(session.id)
+          setCurrentSession(session)
+        } else {
+          // Create new session only if no empty session exists for this profile
+          debug(`Creating new session for profile ${name}...`)
+          const session = await apiCreateSession({ profile_name: name })
+          debug(`Created session: ${session.id.slice(0, 8)}`)
+          setCurrentSessionId(session.id)
+          setCurrentSession(session)
+          // Refresh sessions list in background
+          void refreshSessionsInBackground()
+        }
       } catch (error) {
-        console.error('Failed to create session for profile:', error)
+        console.error('Failed to create/load session for profile:', error)
       }
     }
-  }, [connectionStatus, setSelectedProfile, setCurrentSessionId])
+  }, [connectionStatus, sessions, setSelectedProfile, setCurrentSessionId, refreshSessionsInBackground])
 
   const sendMessage = useCallback(async (content: string) => {
     if (!currentSession || connectionStatus !== 'online') {
@@ -367,10 +389,9 @@ export function useAppState() {
       // Update current session with authoritative response from server
       setCurrentSession(result.session)
 
-      // Refresh sessions list (title may have changed)
-      debug('Refreshing sessions list after response...')
-      const data = await listSessions()
-      setSessions(data)
+      // Refresh sessions list in background (title may have changed)
+      debug('Refreshing sessions list in background after response...')
+      void refreshSessionsInBackground()
     } catch (error) {
       debug('❌ sendMessage error:', error)
       let errorMessage = 'Failed to send message'
@@ -408,13 +429,12 @@ export function useAppState() {
       const session = await apiCreateSession({ profile_name: selectedProfile })
       setCurrentSessionId(session.id)
       setCurrentSession(session)
-      // Refresh sessions list
-      const data = await listSessions()
-      setSessions(data)
+      // Refresh sessions list in background
+      void refreshSessionsInBackground()
     } catch (error) {
       console.error('Failed to create new session:', error)
     }
-  }, [connectionStatus, selectedProfile, setCurrentSessionId])
+  }, [connectionStatus, selectedProfile, setCurrentSessionId, refreshSessionsInBackground])
 
   const switchSession = useCallback(async (sessionId: string) => {
     if (connectionStatus !== 'online') return
@@ -532,6 +552,15 @@ export function useAppState() {
     }))
   }, [currentSession])
 
+  // Memoize the combined session object to prevent new references on unrelated state changes
+  const currentSessionWithMessages = useMemo(() => {
+    if (!currentSession) return null
+    return {
+      ...currentSession,
+      messages: chatMessages,
+    }
+  }, [currentSession, chatMessages])
+
   // --- Return State & Actions ---
 
   return {
@@ -544,10 +573,7 @@ export function useAppState() {
     selectedProfile,
     profileTools,
     sessions,
-    currentSession: currentSession ? {
-      ...currentSession,
-      messages: chatMessages,
-    } : null,
+    currentSession: currentSessionWithMessages,
     chatLoading,
     chatError,
     paletteOpen,
