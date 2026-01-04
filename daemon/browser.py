@@ -3,16 +3,32 @@ Async browser tools for the Code_runner profile.
 
 Uses Playwright's async API to avoid conflicts with FastAPI's asyncio event loop.
 Provides a shared browser instance (visible, non-headless) for all sessions.
+
+Best practices followed:
+- Use domcontentloaded instead of networkidle (avoids hanging on WebSocket pages)
+- Use semantic locators (get_by_role, get_by_text) over CSS selectors
+- Avoid count() checks before actions (race condition)
+- Use condition-based waits instead of hard-coded timeouts
+- Catch specific Playwright exceptions, not bare Exception
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
 from typing import Any
 
-from playwright.async_api import async_playwright, Browser, Page, Playwright
+from playwright.async_api import (
+    async_playwright,
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeout,
+    Error as PlaywrightError,
+)
 
 from ddgs import DDGS
 
@@ -28,6 +44,7 @@ class BrowserManager:
     
     Lazy initialization - browser is created on first tool use.
     All sessions share the same browser context for simplicity.
+    Uses a context with clipboard permissions for paste operations.
     """
 
     _instance: BrowserManager | None = None
@@ -35,6 +52,7 @@ class BrowserManager:
     def __init__(self) -> None:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
         self._page: Page | None = None
 
     @classmethod
@@ -50,12 +68,19 @@ class BrowserManager:
             logger.info("🌐 Launching browser (visible mode)...")
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(headless=False)
-            self._page = await self._browser.new_page()
+            # Create context with clipboard permissions for paste operations
+            self._context = await self._browser.new_context(
+                permissions=["clipboard-read", "clipboard-write"]
+            )
+            self._page = await self._context.new_page()
             logger.info("✅ Browser ready")
         return self._page
 
     async def close(self) -> None:
         """Close browser and cleanup resources."""
+        if self._context is not None:
+            await self._context.close()
+            self._context = None
         if self._browser is not None:
             logger.info("🌐 Closing browser...")
             await self._browser.close()
@@ -115,46 +140,45 @@ async def browser_navigate(url: str) -> str:
     logger.info(f"[TOOL] browser_navigate: {url}")
     page = await get_browser_manager().ensure_browser()
     try:
-        await page.goto(url, wait_until="networkidle", timeout=600000)
+        # Use domcontentloaded - networkidle can hang on pages with WebSockets/polling
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # Wait for page to be fully loaded (but don't require network silence)
+        await page.wait_for_load_state("load", timeout=30000)
 
-        # Auto-dismiss common cookie/consent popups
-        cookie_dismissers = [
-            "button:has-text('AGREE AND PROCEED')",
-            "button:has-text('Agree and proceed')",
-            "button:has-text('Accept all')",
-            "button:has-text('Accept All')",
-            "button:has-text('Accept')",
-            "button:has-text('I agree')",
-            "button:has-text('I Agree')",
-            "button:has-text('Got it')",
-            "button:has-text('OK')",
-            "button:has-text('Continue')",
-            "button:has-text('Close')",
-            "[aria-label='Close']",
-            "[aria-label='close']",
-            ".cookie-accept",
-            "#accept-cookies",
-            "#onetrust-accept-btn-handler",
-            ".cc-accept",
-        ]
-        for _ in range(3):  # Try multiple times in case popups appear after delay
-            for selector in cookie_dismissers:
-                try:
-                    if await page.locator(selector).count() > 0:
-                        await page.locator(selector).first.click(timeout=2000)
-                        logger.info(f"[NAV] Dismissed popup: {selector}")
-                        await page.wait_for_timeout(500)
-                        break
-                except Exception:
-                    pass
-            await page.wait_for_timeout(300)
+        # Auto-dismiss common cookie/consent popups using combined locator
+        # This is much faster than checking 18 selectors in a loop
+        cookie_button = (
+            page.get_by_role("button", name="Accept all")
+            .or_(page.get_by_role("button", name="Accept All"))
+            .or_(page.get_by_role("button", name="Accept"))
+            .or_(page.get_by_role("button", name="I agree"))
+            .or_(page.get_by_role("button", name="Got it"))
+            .or_(page.get_by_role("button", name="OK"))
+            .or_(page.get_by_role("button", name="Continue"))
+            .or_(page.get_by_role("button", name="AGREE AND PROCEED"))
+            .or_(page.locator("#onetrust-accept-btn-handler"))
+            .or_(page.locator(".cc-accept"))
+            .or_(page.locator("#accept-cookies"))
+        )
+        try:
+            # Short timeout - if no popup, move on quickly
+            await cookie_button.first.click(timeout=3000)
+            logger.info("[NAV] Dismissed cookie popup")
+            # Wait for popup to close
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except PlaywrightTimeout:
+            pass  # No cookie popup found, that's fine
 
         return json.dumps({
             "status": "success",
             "url": page.url,
             "title": await page.title(),
         })
-    except Exception as e:
+    except PlaywrightTimeout as e:
+        logger.error(f"[TOOL] browser_navigate timeout: {e}")
+        return json.dumps({"status": "error", "message": f"Navigation timed out: {e}"})
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_navigate error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -162,68 +186,94 @@ async def browser_get_text() -> str:
     """Get visible text content from page."""
     page = await get_browser_manager().ensure_browser()
     try:
-        # 10 minute timeout for getting page text (pages can be slow)
-        text = await page.inner_text("body", timeout=600000)
+        # Wait for body to be present, then get text
+        body = page.locator("body")
+        await body.wait_for(state="attached", timeout=30000)
+        text = await body.inner_text(timeout=30000)
         # Truncate for LLM context
         return text[:3000] if len(text) > 3000 else text
-    except Exception as e:
-        logger.error(f"[TOOL] browser_get_text ERROR: {e}")
+    except PlaywrightTimeout:
+        logger.error("[TOOL] browser_get_text: timeout waiting for page content")
+        return json.dumps({"status": "error", "message": "Timeout getting page text"})
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_get_text error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
 async def browser_click(selector: str) -> str:
-    """Click element by CSS selector or text."""
+    """
+    Click element by selector or text.
+    
+    Tries multiple strategies in order:
+    1. Role-based (if selector looks like a button/link name)
+    2. Text-based 
+    3. CSS selector
+    """
     logger.info(f"[TOOL] browser_click: {selector}")
     page = await get_browser_manager().ensure_browser()
+    
     try:
-        # Try as CSS selector first with 10 minute timeout
-        if await page.locator(selector).count() > 0:
-            await page.locator(selector).first.click(timeout=600000)
-        else:
-            # Try as text content
-            await page.get_by_text(selector, exact=False).first.click(timeout=600000)
-        await page.wait_for_timeout(500)
+        # Build a combined locator that tries multiple strategies
+        # Playwright will use the first one that matches
+        locator = (
+            page.get_by_role("button", name=selector)
+            .or_(page.get_by_role("link", name=selector))
+            .or_(page.get_by_text(selector, exact=False))
+            .or_(page.locator(selector))
+        )
+        
+        # Let Playwright's auto-waiting handle element presence
+        # No need to check count() first - that's a race condition
+        await locator.first.click(timeout=30000)
+        
+        # Wait for any navigation or state change triggered by click
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        
         return json.dumps({"status": "clicked", "selector": selector})
-    except Exception as e:
+    except PlaywrightTimeout:
+        logger.warning(f"[TOOL] browser_click: element not found: {selector}")
+        return json.dumps({"status": "error", "message": f"Element not found: {selector}"})
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_click error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
 async def browser_get_elements() -> str:
     """List interactive elements on page."""
-    import asyncio
     page = await get_browser_manager().ensure_browser()
     elements: list[dict[str, str]] = []
 
     try:
-        # 10 minute overall timeout for element discovery
-        async with asyncio.timeout(600):
-            # Get buttons
-            buttons = await page.locator("button").all()
-            for btn in buttons[:10]:
-                try:
-                    text = await btn.inner_text(timeout=60000)
-                    text = text[:50]
-                    if text.strip():
-                        elements.append({"type": "button", "text": text})
-                except Exception:
-                    pass
+        # Use get_by_role for semantic element discovery
+        # Get buttons using role
+        buttons = page.get_by_role("button")
+        button_count = await buttons.count()
+        for i in range(min(button_count, 10)):
+            try:
+                btn = buttons.nth(i)
+                text = await btn.inner_text(timeout=5000)
+                text = text[:50].strip()
+                if text:
+                    elements.append({"type": "button", "text": text})
+            except PlaywrightTimeout:
+                pass
 
-            # Get links
-            links = await page.locator("a").all()
-            for link in links[:10]:
-                try:
-                    text = await link.inner_text(timeout=60000)
-                    text = text[:50]
-                    if text.strip():
-                        elements.append({"type": "link", "text": text})
-                except Exception:
-                    pass
+        # Get links using role
+        links = page.get_by_role("link")
+        link_count = await links.count()
+        for i in range(min(link_count, 10)):
+            try:
+                link = links.nth(i)
+                text = await link.inner_text(timeout=5000)
+                text = text[:50].strip()
+                if text:
+                    elements.append({"type": "link", "text": text})
+            except PlaywrightTimeout:
+                pass
 
-            return json.dumps(elements[:15])
-    except asyncio.TimeoutError:
-        logger.error("[TOOL] browser_get_elements: timed out after 10 minutes")
-        return json.dumps({"status": "error", "message": "Timed out getting elements"})
-    except Exception as e:
+        return json.dumps(elements[:15])
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_get_elements error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -241,75 +291,67 @@ async def browser_wait(seconds: int) -> str:
 async def browser_paste_code(code: str) -> str:
     """
     Paste code into the active editor.
-    Uses clipboard paste as primary method (much faster than typing).
-    Falls back to typing if paste fails.
+    
+    Strategy (in order of preference):
+    1. Use page.fill() for textareas (fastest, most reliable)
+    2. Use keyboard paste via clipboard API
+    3. Fall back to typing (slowest but works everywhere)
     """
-    import asyncio
     logger.info(f"[TOOL] browser_paste_code: {len(code)} chars")
     page = await get_browser_manager().ensure_browser()
     
-    # Overall timeout: 10 minutes for pasting code
     try:
-        async with asyncio.timeout(600):
-            # First, try to find and focus the code editor
-            editor_selectors = [
-                "textarea",  # Plain textarea (most common)
-                ".ace_text-input",  # ACE Editor input
-                ".ace_editor",  # ACE Editor container
-                ".monaco-editor textarea",  # Monaco Editor
-                ".CodeMirror textarea",  # CodeMirror
-                "[contenteditable=true]",  # Contenteditable div
-                ".editor",  # Generic editor class
-                "#code",  # Common ID
-                "#source",  # Common ID
-            ]
+        # Strategy 1: Try to find a fillable textarea and use page.fill()
+        # This is the most reliable method for standard textareas
+        textarea = page.locator("textarea").first
+        try:
+            await textarea.wait_for(state="visible", timeout=5000)
+            await textarea.fill(code, timeout=30000)
+            logger.info(f"[TOOL] browser_paste_code: filled {len(code)} chars via fill()")
+            return json.dumps({"status": "success", "code_length": len(code), "method": "fill"})
+        except PlaywrightTimeout:
+            logger.debug("[TOOL] No fillable textarea found, trying other editors")
 
-            focused = False
-            for selector in editor_selectors:
-                try:
-                    if await page.locator(selector).count() > 0:
-                        await page.locator(selector).first.click(timeout=60000)
-                        focused = True
-                        await page.wait_for_timeout(200)
-                        break
-                except Exception:
-                    continue
+        # Strategy 2: Try specialized code editors (ACE, Monaco, CodeMirror)
+        editor_locator = (
+            page.locator(".ace_text-input")
+            .or_(page.locator(".monaco-editor textarea"))
+            .or_(page.locator(".CodeMirror textarea"))
+            .or_(page.locator("[contenteditable=true]"))
+        )
+        
+        try:
+            await editor_locator.first.click(timeout=10000)
+        except PlaywrightTimeout:
+            # Last resort: click in center of page
+            viewport = page.viewport_size
+            if viewport:
+                await page.mouse.click(viewport["width"] // 2, viewport["height"] // 3)
 
-            if not focused:
-                # Click in the upper area of the page (usually where editors are)
-                viewport = page.viewport_size
-                if viewport:
-                    await page.mouse.click(viewport["width"] // 2, viewport["height"] // 3)
-                    await page.wait_for_timeout(200)
+        # Select all and delete existing content
+        mod_key = "Meta" if sys.platform == "darwin" else "Control"
+        await page.keyboard.press(f"{mod_key}+a")
+        await page.keyboard.press("Backspace")
 
-            # Select all existing content
-            mod_key = "Meta" if sys.platform == "darwin" else "Control"
-            await page.keyboard.press(f"{mod_key}+a")
-            await page.wait_for_timeout(100)
+        # Strategy 3: Try clipboard paste (context has clipboard permissions)
+        try:
+            await page.evaluate("text => navigator.clipboard.writeText(text)", code)
+            await page.keyboard.press(f"{mod_key}+v")
+            logger.info(f"[TOOL] browser_paste_code: pasted {len(code)} chars via clipboard")
+            return json.dumps({"status": "success", "code_length": len(code), "method": "clipboard"})
+        except PlaywrightError as paste_err:
+            logger.warning(f"[TOOL] Clipboard paste failed: {paste_err}")
 
-            # Delete selected content
-            await page.keyboard.press("Backspace")
-            await page.wait_for_timeout(100)
+        # Strategy 4: Fall back to typing (slowest but works everywhere)
+        await page.keyboard.type(code, delay=1)
+        logger.info(f"[TOOL] browser_paste_code: typed {len(code)} chars")
+        return json.dumps({"status": "success", "code_length": len(code), "method": "typing"})
 
-            # Try clipboard paste first (much faster for large code)
-            try:
-                await page.evaluate(f"navigator.clipboard.writeText({json.dumps(code)})")
-                await page.keyboard.press(f"{mod_key}+v")
-                await page.wait_for_timeout(300)
-                logger.info(f"[TOOL] browser_paste_code: pasted {len(code)} chars via clipboard")
-                return json.dumps({"status": "success", "code_length": len(code), "method": "clipboard"})
-            except Exception as paste_err:
-                logger.warning(f"[TOOL] Clipboard paste failed, falling back to typing: {paste_err}")
-
-            # Fallback: Type the code directly (slower but more reliable)
-            await page.keyboard.type(code, delay=1)
-
-            return json.dumps({"status": "success", "code_length": len(code), "method": "typing"})
-    except asyncio.TimeoutError:
-        logger.error("[TOOL] browser_paste_code: timed out after 10 minutes")
-        return json.dumps({"status": "error", "message": "Operation timed out after 10 minutes"})
-    except Exception as e:
-        logger.error(f"[TOOL] browser_paste_code ERROR: {e}")
+    except PlaywrightTimeout as e:
+        logger.error(f"[TOOL] browser_paste_code timeout: {e}")
+        return json.dumps({"status": "error", "message": "Operation timed out"})
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_paste_code error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -317,34 +359,31 @@ async def browser_type_slow(text: str) -> str:
     """
     Type text character by character. Fallback for editors that don't support paste.
     """
-    import asyncio
+    logger.info(f"[TOOL] browser_type_slow: {len(text)} chars")
     page = await get_browser_manager().ensure_browser()
     try:
-        # 10 minute overall timeout
-        async with asyncio.timeout(600):
-            # Select all first to replace
-            mod_key = "Meta" if sys.platform == "darwin" else "Control"
-            await page.keyboard.press(f"{mod_key}+a")
-            await page.wait_for_timeout(100)
+        # Select all first to replace existing content
+        mod_key = "Meta" if sys.platform == "darwin" else "Control"
+        await page.keyboard.press(f"{mod_key}+a")
 
-            # Type with delay between characters
-            await page.keyboard.type(text, delay=10)
+        # Type with delay between characters (10ms = readable typing speed)
+        await page.keyboard.type(text, delay=10)
 
-            return json.dumps({"status": "success", "chars_typed": len(text)})
-    except asyncio.TimeoutError:
-        logger.error("[TOOL] browser_type_slow: timed out after 10 minutes")
-        return json.dumps({"status": "error", "message": "Typing timed out after 10 minutes"})
-    except Exception as e:
+        return json.dumps({"status": "success", "chars_typed": len(text)})
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_type_slow error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
 async def browser_press_key(key: str) -> str:
     """Press a keyboard key (Enter, Tab, Escape, etc.)."""
+    logger.info(f"[TOOL] browser_press_key: {key}")
     page = await get_browser_manager().ensure_browser()
     try:
         await page.keyboard.press(key)
         return json.dumps({"status": "pressed", "key": key})
-    except Exception as e:
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_press_key error: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -353,72 +392,76 @@ async def browser_analyze_page() -> str:
     Analyze the current page to determine if it's ready for code input.
     Returns structured info about code editors, textareas, and run buttons.
     """
-    import asyncio
     logger.info("[TOOL] browser_analyze_page")
     page = await get_browser_manager().ensure_browser()
+    
     try:
-        # 10 minute overall timeout for page analysis
-        async with asyncio.timeout(600):
-            # Check for code editors / textareas
-            editor_found: dict[str, str] | None = None
-            editor_checks = [
-                ("textarea", "textarea"),
-                (".ace_editor", "ACE editor"),
-                (".CodeMirror", "CodeMirror"),
-                (".monaco-editor", "Monaco editor"),
-                ("#code", "code input"),
-                ("#source", "source input"),
-            ]
+        # Check for code editors / textareas using combined locator
+        editor_locator = (
+            page.locator("textarea")
+            .or_(page.locator(".ace_editor"))
+            .or_(page.locator(".CodeMirror"))
+            .or_(page.locator(".monaco-editor"))
+        )
+        
+        editor_found: dict[str, str] | None = None
+        editor_count = await editor_locator.count()
+        if editor_count > 0:
+            # Determine which type was found
+            if await page.locator("textarea").count() > 0:
+                editor_found = {"selector": "textarea", "type": "textarea"}
+            elif await page.locator(".ace_editor").count() > 0:
+                editor_found = {"selector": ".ace_editor", "type": "ACE editor"}
+            elif await page.locator(".CodeMirror").count() > 0:
+                editor_found = {"selector": ".CodeMirror", "type": "CodeMirror"}
+            elif await page.locator(".monaco-editor").count() > 0:
+                editor_found = {"selector": ".monaco-editor", "type": "Monaco editor"}
 
-            for selector, name in editor_checks:
-                try:
-                    if await page.locator(selector).count() > 0:
-                        editor_found = {"selector": selector, "type": name}
-                        break
-                except Exception:
-                    pass
-
-            # Check for run/execute buttons
-            run_button_found: dict[str, str] | None = None
-            run_checks = [
-                ("button:has-text('Run')", "Run"),
-                ("button:has-text('Execute')", "Execute"),
-                ("button:has-text('Submit')", "Submit"),
-                ("#run", "run"),
-                (".run-button", "run-button"),
-                ("button:has-text('Go')", "Go"),
-                ("[data-testid='run']", "run testid"),
-            ]
-
-            for selector, name in run_checks:
-                try:
-                    if await page.locator(selector).count() > 0:
-                        run_button_found = {"selector": selector, "name": name}
-                        break
-                except Exception:
-                    pass
-
-            ready = editor_found is not None and run_button_found is not None
-
-            result: dict[str, Any] = {
-                "ready_for_code": ready,
-                "editor": editor_found,
-                "run_button": run_button_found,
-            }
-
-            if ready and run_button_found:
-                result["action"] = f"READY! Use browser_paste_code, then browser_click with selector: {run_button_found['selector']}"
-            elif editor_found and not run_button_found:
-                result["action"] = "Has editor but no Run button found. Try pressing Ctrl+Enter or look for other buttons."
+        # Check for run/execute buttons using semantic locators
+        run_button_locator = (
+            page.get_by_role("button", name="Run")
+            .or_(page.get_by_role("button", name="Execute"))
+            .or_(page.get_by_role("button", name="Submit"))
+            .or_(page.get_by_role("button", name="Go"))
+            .or_(page.locator("#run"))
+            .or_(page.locator(".run-button"))
+            .or_(page.locator("[data-testid='run']"))
+        )
+        
+        run_button_found: dict[str, str] | None = None
+        run_count = await run_button_locator.count()
+        if run_count > 0:
+            # Determine which button was found
+            if await page.get_by_role("button", name="Run").count() > 0:
+                run_button_found = {"selector": "button:has-text('Run')", "name": "Run"}
+            elif await page.get_by_role("button", name="Execute").count() > 0:
+                run_button_found = {"selector": "button:has-text('Execute')", "name": "Execute"}
+            elif await page.get_by_role("button", name="Submit").count() > 0:
+                run_button_found = {"selector": "button:has-text('Submit')", "name": "Submit"}
+            elif await page.locator("#run").count() > 0:
+                run_button_found = {"selector": "#run", "name": "run"}
             else:
-                result["action"] = "NOT a playground. Go back and try a different URL."
+                run_button_found = {"selector": "Run", "name": "Run button"}
 
-            return json.dumps(result)
-    except asyncio.TimeoutError:
-        logger.error("[TOOL] browser_analyze_page: timed out after 10 minutes")
-        return json.dumps({"status": "error", "message": "Page analysis timed out after 10 minutes"})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+        ready = editor_found is not None and run_button_found is not None
+
+        result: dict[str, Any] = {
+            "ready_for_code": ready,
+            "editor": editor_found,
+            "run_button": run_button_found,
+        }
+
+        if ready and run_button_found:
+            result["action"] = f"READY! Use browser_paste_code, then browser_click with: {run_button_found['name']}"
+        elif editor_found and not run_button_found:
+            result["action"] = "Has editor but no Run button found. Try pressing Ctrl+Enter or look for other buttons."
+        else:
+            result["action"] = "NOT a playground. Go back and try a different URL."
+
+        return json.dumps(result)
+    except PlaywrightError as e:
+        logger.error(f"[TOOL] browser_analyze_page error: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 # --- Tool Registry for Daemon ---
