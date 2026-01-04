@@ -5,6 +5,7 @@ Architecture:
 - ChatService: orchestrates conversation flow with tool execution
 - Uses singleton QwenModel for inference
 - Integrates with ToolRegistry for tool execution
+- Uses Profile system for configuration
 - Supports both sync and async operation modes
 """
 
@@ -16,14 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .config import (
-    AgentProfile,
-    ToolSpec,
-    ModelSize,
-    AGENT_PROFILES,
-    get_tools_for_profile,
-)
-from .tools import get_registry, ToolRegistry
+from .tools import Tool, ToolSpec, get_registry, ToolRegistry
+from .profiles import Profile, get_profile, ALL_PROFILES
 
 
 # --- Message Types ---
@@ -67,7 +62,7 @@ class ChatResponse:
 # --- Prompt Formatting (Pure Functions) ---
 
 
-def format_tools_prompt(tools: tuple[ToolSpec, ...]) -> str:
+def format_tools_prompt(tools: tuple[Tool, ...]) -> str:
     """Format tool specs into system prompt section."""
     if not tools:
         return ""
@@ -92,9 +87,9 @@ For each function call, return a json object with function name and arguments wi
 </tool_call>"""
 
 
-def build_system_prompt(profile: AgentProfile, tools: tuple[ToolSpec, ...]) -> str:
+def build_system_prompt(profile: Profile) -> str:
     """Build complete system prompt from profile and tools."""
-    return profile.system_prompt + format_tools_prompt(tools)
+    return profile.system_prompt + format_tools_prompt(profile.tools)
 
 
 def parse_tool_calls(response: str) -> list[ToolCall]:
@@ -132,6 +127,26 @@ def format_tool_results(results: list[ToolResult]) -> str:
     )
 
 
+def extract_thinking(response: str) -> str | None:
+    """Extract thinking content from LLM response."""
+    match = re.search(r"<think>(.*?)</think>", response, re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+# --- Model Size Enum ---
+
+
+from enum import Enum
+
+
+class ModelSize(Enum):
+    """Available model sizes mapped to MLX model IDs."""
+
+    SMALL = "mlx-community/Qwen2.5-7B-Instruct-4bit"  # ~5GB
+    MEDIUM = "mlx-community/Qwen2.5-14B-Instruct-4bit"  # ~10GB
+    LARGE = "mlx-community/Qwen3-32B-4bit"  # ~18GB
+
+
 # --- Qwen Model Singleton ---
 
 
@@ -140,17 +155,14 @@ class QwenModel:
     Singleton wrapper around MLX-LM Qwen model.
 
     Loads model lazily on first inference request.
-    Keeps model in memory for subsequent requests.
-
-    Note: MLX types are Any since mlx_lm lacks type stubs.
     """
 
     _instance: QwenModel | None = None
 
     def __init__(self, model_size: ModelSize = ModelSize.LARGE) -> None:
         self._model_size = model_size
-        self._model: Any = None  # mlx.nn.Module (no stubs)
-        self._tokenizer: Any = None  # TokenizerWrapper (no stubs)
+        self._model: Any = None
+        self._tokenizer: Any = None
 
     @classmethod
     def get_instance(cls, model_size: ModelSize = ModelSize.LARGE) -> QwenModel:
@@ -160,13 +172,12 @@ class QwenModel:
         return cls._instance
 
     def _ensure_loaded(self) -> tuple[Any, Any]:
-        """Lazy load model and tokenizer. Returns (model, tokenizer)."""
+        """Lazy load model and tokenizer."""
         if self._model is None or self._tokenizer is None:
             from mlx_lm import load
 
             print(f"Loading {self._model_size.value}...")
             result = load(self._model_size.value)
-            # load() returns (model, tokenizer) or (model, tokenizer, config)
             self._model = result[0]
             self._tokenizer = result[1]
             print("Model loaded.")
@@ -186,7 +197,6 @@ class QwenModel:
             add_generation_prompt=True,
         )
 
-        # mlx_lm lacks complete type stubs; import and call within Any scope
         import mlx_lm
 
         generate_fn = getattr(mlx_lm, "generate")
@@ -213,7 +223,7 @@ class ChatService:
     Orchestrates chat conversations with tool execution.
 
     Features:
-    - Profile-based configuration (system prompt, tools, settings)
+    - Profile-based configuration
     - Multi-round tool execution loop
     - Streaming-ready architecture
     """
@@ -234,18 +244,9 @@ class ChatService:
         verbose: bool = False,
     ) -> ChatResponse:
         """
-        Process a chat message with the specified agent profile.
-
-        Args:
-            user_message: The user's input
-            profile_name: Name of agent profile to use
-            conversation_history: Optional prior conversation context
-            verbose: Whether to print debug info
-
-        Returns:
-            ChatResponse with final content and metadata
+        Process a chat message with the specified agent profile (sync version).
         """
-        profile = AGENT_PROFILES.get(profile_name)
+        profile = get_profile(profile_name)
         if profile is None:
             return ChatResponse(
                 content=f"Unknown profile: {profile_name}",
@@ -255,19 +256,16 @@ class ChatService:
                 finished=True,
             )
 
-        tools = get_tools_for_profile(profile_name)
-        system_prompt = build_system_prompt(profile, tools)
+        system_prompt = build_system_prompt(profile)
 
-        # Build initial conversation
         conversation: list[ChatMessage] = list(conversation_history or [])
         conversation.append(ChatMessage("user", user_message))
 
         all_tool_calls: list[ToolCall] = []
         all_tool_results: list[ToolResult] = []
-        response: str = ""  # Initialize for type checker; always assigned in loop
+        response: str = ""
 
         for round_num in range(profile.max_tool_rounds):
-            # Build messages for model
             messages = self._build_messages(system_prompt, conversation)
 
             if verbose:
@@ -277,31 +275,24 @@ class ChatService:
 
             if verbose:
                 preview = response[:500] + "..." if len(response) > 500 else response
-                print(
-                    f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}"
-                )
+                print(f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}")
 
-            # Parse tool calls
             tool_calls = parse_tool_calls(response)
 
             if not tool_calls:
-                # No tool calls - return final response
                 final_content = extract_final_response(response)
 
-                # Handle model stuck in thinking loop
                 if (
                     "<think>" in response
                     and len(final_content) < 50
                     and round_num < 3
-                    and tools
+                    and profile.tools
                 ):
                     if verbose:
                         print("🔄 Model thinking without acting, nudging...")
                     conversation.append(ChatMessage("assistant", response))
                     conversation.append(
-                        ChatMessage(
-                            "user", "Now use your tools to help answer the question."
-                        )
+                        ChatMessage("user", "Now use your tools to help answer the question.")
                     )
                     continue
 
@@ -318,7 +309,6 @@ class ChatService:
                 for tc in tool_calls:
                     print(f"   - {tc.name}({tc.arguments})")
 
-            # Execute tools
             round_results: list[ToolResult] = []
             for tc in tool_calls:
                 result = self._registry.execute(tc.name, tc.arguments)
@@ -332,17 +322,15 @@ class ChatService:
                     preview = tr.result[:200]
                     print(f"   - {tr.tool_name}: {preview}")
 
-            # Add to conversation
             conversation.append(ChatMessage("assistant", response))
             conversation.append(ChatMessage("user", format_tool_results(round_results)))
 
-        # Max rounds reached
         return ChatResponse(
             content=extract_final_response(response),
             tool_calls=tuple(all_tool_calls),
             tool_results=tuple(all_tool_results),
             rounds_used=profile.max_tool_rounds,
-            finished=False,  # Hit limit, might not be complete
+            finished=False,
         )
 
     def _build_messages(
@@ -367,20 +355,9 @@ class ChatService:
         """
         Process a chat message with the specified agent profile (async version).
 
-        This version supports async tools (like browser tools) and runs model
-        generation in a thread pool to avoid blocking the event loop.
-
-        Args:
-            user_message: The user's input
-            profile_name: Name of agent profile to use
-            conversation_history: Optional prior conversation context
-            verbose: Whether to print debug info
-            on_event: Optional async callback for SSE event streaming
-
-        Returns:
-            ChatResponse with final content and metadata
+        Supports async tools and runs model generation in a thread pool.
         """
-        profile = AGENT_PROFILES.get(profile_name)
+        profile = get_profile(profile_name)
         if profile is None:
             return ChatResponse(
                 content=f"Unknown profile: {profile_name}",
@@ -390,76 +367,71 @@ class ChatService:
                 finished=True,
             )
 
-        tools = get_tools_for_profile(profile_name)
-        system_prompt = build_system_prompt(profile, tools)
+        system_prompt = build_system_prompt(profile)
         max_rounds = profile.max_tool_rounds
 
-        # Helper to emit events
         async def emit(event: dict[str, Any]) -> None:
             if on_event is not None:
                 await on_event(event)
 
-        # Build initial conversation
         conversation: list[ChatMessage] = list(conversation_history or [])
         conversation.append(ChatMessage("user", user_message))
 
         all_tool_calls: list[ToolCall] = []
         all_tool_results: list[ToolResult] = []
-        response: str = ""  # Initialize for type checker; always assigned in loop
+        response: str = ""
 
         for round_num in range(max_rounds):
-            # Emit round start event
             await emit({
                 "type": "round_start",
                 "round": round_num + 1,
                 "max_rounds": max_rounds,
             })
 
-            # Build messages for model
             messages = self._build_messages(system_prompt, conversation)
 
             if verbose:
                 print(f"\n⏳ Round {round_num + 1} - Generating...")
 
-            # Emit generating event
             await emit({
                 "type": "generating",
                 "round": round_num + 1,
                 "max_rounds": max_rounds,
             })
 
-            # Run model generation in thread pool (MLX-LM is synchronous)
             response = await asyncio.to_thread(
                 self._model.generate, messages, profile.max_tokens
             )
 
             if verbose:
                 preview = response[:500] + "..." if len(response) > 500 else response
-                print(
-                    f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}"
-                )
+                print(f"✅ Round {round_num + 1} - Response:\n{'-' * 40}\n{preview}\n{'-' * 40}")
 
-            # Parse tool calls
+            thinking = extract_thinking(response)
+            if thinking:
+                await emit({
+                    "type": "thinking",
+                    "content": thinking[:2000],
+                    "round": round_num + 1,
+                    "max_rounds": max_rounds,
+                })
+
             tool_calls = parse_tool_calls(response)
 
             if not tool_calls:
-                # No tool calls - return final response
                 final_content = extract_final_response(response)
 
-                # Handle model stuck in thinking loop
                 if (
                     "<think>" in response
                     and len(final_content) < 50
                     and round_num < 3
-                    and tools
+                    and profile.tools
                 ):
                     if verbose:
                         print("🔄 Model thinking without acting, nudging...")
                     conversation.append(ChatMessage("assistant", response))
                     conversation.append(
-                        ChatMessage(
-                            "user", "Now use your tools to help answer the question."
-                        )
+                        ChatMessage("user", "Now use your tools to help answer the question.")
                     )
                     continue
 
@@ -476,10 +448,8 @@ class ChatService:
                 for tc in tool_calls:
                     print(f"   - {tc.name}({tc.arguments})")
 
-            # Execute tools (async-aware)
             round_results: list[ToolResult] = []
             for tc in tool_calls:
-                # Emit tool_start event (truncate large args for SSE)
                 truncated_args = _truncate_args(tc.arguments)
                 await emit({
                     "type": "tool_start",
@@ -494,10 +464,10 @@ class ChatService:
                 all_tool_calls.append(tc)
                 all_tool_results.append(round_results[-1])
 
-                # Emit tool_end event
                 await emit({
                     "type": "tool_end",
                     "tool_name": tc.name,
+                    "tool_result": _truncate_result(result),
                     "round": round_num + 1,
                     "max_rounds": max_rounds,
                 })
@@ -508,17 +478,15 @@ class ChatService:
                     preview = tr.result[:200]
                     print(f"   - {tr.tool_name}: {preview}")
 
-            # Add to conversation
             conversation.append(ChatMessage("assistant", response))
             conversation.append(ChatMessage("user", format_tool_results(round_results)))
 
-        # Max rounds reached
         return ChatResponse(
             content=extract_final_response(response),
             tool_calls=tuple(all_tool_calls),
             tool_results=tuple(all_tool_results),
             rounds_used=profile.max_tool_rounds,
-            finished=False,  # Hit limit, might not be complete
+            finished=False,
         )
 
 
@@ -526,11 +494,23 @@ def _truncate_args(args: dict[str, Any], max_len: int = 200) -> dict[str, Any]:
     """Truncate large argument values for SSE streaming."""
     truncated: dict[str, Any] = {}
     for key, value in args.items():
-        if isinstance(value, str) and len(value) > max_len:
-            truncated[key] = value[:max_len] + "..."
+        if isinstance(value, str):
+            if key == 'code':
+                truncated[key] = value
+            elif len(value) > max_len:
+                truncated[key] = value[:max_len] + "..."
+            else:
+                truncated[key] = value
         else:
             truncated[key] = value
     return truncated
+
+
+def _truncate_result(result: str, max_len: int = 500) -> str:
+    """Truncate tool result for SSE streaming."""
+    if len(result) > max_len:
+        return result[:max_len] + "..."
+    return result
 
 
 # --- Factory Functions ---
@@ -562,7 +542,6 @@ if __name__ == "__main__":
     print("Chat Service Test")
     print("=" * 40)
 
-    # Test general chat
     response = service.chat("What is 2 + 2?", profile_name="general", verbose=True)
     print(f"\nFinal response: {response.content}")
     print(f"Rounds used: {response.rounds_used}")

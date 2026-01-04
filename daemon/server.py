@@ -4,9 +4,12 @@ FastAPI server for Qwen daemon.
 Endpoints:
 - GET  /health           - Health check and model status
 - POST /v1/chat          - Chat completion with profile/tools
-- POST /v1/invoke-tool   - Direct tool invocation (optional)
+- POST /v1/invoke-tool   - Direct tool invocation (local-only API)
+- GET  /v1/tools         - List all available tools
+- GET  /v1/tools/{name}  - Get tool spec by name
+- POST /v1/tools/{name}/invoke - Invoke specific tool (local-only API)
 - GET  /v1/profiles      - List available agent profiles
-- GET  /v1/tools         - List available tools
+- GET  /v1/profiles/{name}/tools - Get tools for a profile
 
 Startup behavior:
 - Model is pre-loaded at startup for fast first response
@@ -20,7 +23,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 # Configure logging
 logging.basicConfig(
@@ -34,19 +37,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .config import (
-    AGENT_PROFILES,
-    ALL_TOOL_SPECS,
-    ModelSize,
-    get_tools_for_profile,
-)
+from .tools import get_registry, ToolSpec
+from .profiles import ALL_PROFILES, get_profile
 from .chat import (
     ChatMessage,
     ChatService,
     create_chat_service,
+    ModelSize,
 )
-from .tools import get_registry
 from .sessions import get_session_store, Session
+
+# Import session context functions for tool execution
+from .tools.mirror.data_store import set_session_context, reset_session_context
 
 
 # --- Request/Response Models ---
@@ -97,7 +99,15 @@ class ChatResponseModel(BaseModel):
 
 
 class ToolInvokeRequest(BaseModel):
-    """Request body for /v1/invoke-tool endpoint."""
+    """Request body for tool invocation endpoints."""
+
+    arguments: dict[str, Any] = Field(
+        default_factory=dict, description="Tool arguments"
+    )
+
+
+class LegacyToolInvokeRequest(BaseModel):
+    """Legacy request body for /v1/invoke-tool endpoint."""
 
     tool_name: str = Field(..., description="Name of tool to invoke")
     arguments: dict[str, Any] = Field(
@@ -106,7 +116,7 @@ class ToolInvokeRequest(BaseModel):
 
 
 class ToolInvokeResponse(BaseModel):
-    """Response body for /v1/invoke-tool endpoint."""
+    """Response body for tool invocation endpoints."""
 
     tool_name: str
     result: Any
@@ -242,9 +252,6 @@ class GenerationStatus(BaseModel):
 # --- SSE Event Types ---
 
 
-from typing import Literal
-
-
 class GenerationEvent(BaseModel):
     """Server-Sent Event for generation progress."""
 
@@ -270,38 +277,25 @@ class AppState:
         self._chat_services: dict[ModelSize, ChatService] = {}
         self._current_model_size: ModelSize | None = None
         self._model_loaded: bool = False
-        # Semaphore for model generation - only one at a time on M4
         self._generation_lock: asyncio.Lock = asyncio.Lock()
         self._generation_in_progress: bool = False
-        # Queue tracking for generation status
         self._generating_session_id: str | None = None
         self._queued_session_ids: list[str] = []
-        # Thread lock for atomic queue operations (concurrent requests)
         self._queue_lock: threading.Lock = threading.Lock()
-        # Position counter - monotonically increasing, tracks arrival order
-        # Maps session_id -> position when it was first added
         self._position_map: dict[str, int] = {}
         self._next_position: int = 0
 
     @property
     def generation_lock(self) -> asyncio.Lock:
-        """Get the generation lock for serializing model access."""
         return self._generation_lock
 
     @property
     def is_generating(self) -> bool:
-        """Check if generation is currently in progress."""
         return self._generation_in_progress
 
     def set_generating(self, value: bool, session_id: str | None = None) -> None:
-        """Set generation status and optionally the generating session ID.
-
-        NOTE: We do NOT remove from queue here - that's done by remove_from_queue
-        when generation is fully complete. Removing early would cause later arrivals
-        to see an empty queue and get incorrect position calculations.
-        """
         with self._queue_lock:
-            logger.debug(f"set_generating({value}, session={session_id}) - was generating: {self._generation_in_progress}")
+            logger.debug(f"set_generating({value}, session={session_id})")
             self._generation_in_progress = value
             if value and session_id:
                 self._generating_session_id = session_id
@@ -311,65 +305,30 @@ class AppState:
                 self._generating_session_id = None
 
     def add_to_queue(self, session_id: str) -> int:
-        """Add a session to the queue and return its position atomically.
-        
-        Position is a monotonically increasing counter representing arrival order:
-        - 0 means first to arrive in this batch
-        - 1 means second to arrive
-        - etc.
-        
-        The counter resets when the queue becomes completely empty (no pending
-        requests). This gives meaningful positions within a batch of concurrent
-        requests.
-        """
         with self._queue_lock:
-            # Check if already has a position (shouldn't happen, but be safe)
             if session_id in self._position_map:
-                logger.debug(f"Session {session_id[:8]} already in queue at position {self._position_map[session_id]}")
                 return self._position_map[session_id]
             
-            # Get next position from counter
             position = self._next_position
             self._next_position += 1
-            
-            # Record position and add to queue
             self._position_map[session_id] = position
             if session_id not in self._queued_session_ids:
                 self._queued_session_ids.append(session_id)
             
-            queue_size = len(self._queued_session_ids)
-            logger.info(f"📥 Session {session_id[:8]} added to queue at position {position} (queue size: {queue_size})")
+            logger.info(f"📥 Session {session_id[:8]} added to queue at position {position}")
             return position
 
     def remove_from_queue(self, session_id: str) -> None:
-        """Remove a session from the queue (on completion or error).
-        
-        NOTE: We intentionally do NOT reset the position counter here.
-        Resetting when queue is empty would cause a race condition where
-        a request that completes before others arrive causes later requests
-        to get position 0 again.
-        
-        The counter grows monotonically - positions indicate relative arrival
-        order. For overlapping requests, positions 0, 1, 2 mean first, second,
-        third to arrive. For non-overlapping requests, positions might be
-        10, 11, 12 but the relative order is still meaningful.
-        """
         with self._queue_lock:
-            was_in_queue = session_id in self._queued_session_ids
-            was_generating = self._generating_session_id == session_id
-            
             if session_id in self._queued_session_ids:
                 self._queued_session_ids.remove(session_id)
             if session_id in self._position_map:
                 del self._position_map[session_id]
             if self._generating_session_id == session_id:
                 self._generating_session_id = None
-            
-            queue_size = len(self._queued_session_ids)
-            logger.info(f"📤 Session {session_id[:8]} removed from queue (was_in_queue={was_in_queue}, was_generating={was_generating}, remaining: {queue_size})")
+            logger.info(f"📤 Session {session_id[:8]} removed from queue")
 
     def get_generation_status(self) -> GenerationStatus:
-        """Get current generation queue status."""
         with self._queue_lock:
             return GenerationStatus(
                 generating_session_id=self._generating_session_id,
@@ -377,27 +336,22 @@ class AppState:
             )
 
     def get_chat_service(self, model_size: ModelSize) -> ChatService:
-        """Get or create chat service for model size."""
         if model_size not in self._chat_services:
             logger.info(f"🔧 Creating new chat service for model size: {model_size.name}")
             start_time = time.time()
             self._chat_services[model_size] = create_chat_service(model_size)
             elapsed = time.time() - start_time
             logger.info(f"✅ Chat service created in {elapsed:.1f}s")
-        else:
-            logger.debug(f"Reusing existing chat service for {model_size.name}")
         self._current_model_size = model_size
         self._model_loaded = True
         return self._chat_services[model_size]
 
     @property
     def model_loaded(self) -> bool:
-        """Check if any model is currently loaded."""
         return self._model_loaded
 
     @property
     def current_model_size(self) -> ModelSize | None:
-        """Get current model size."""
         return self._current_model_size
 
 
@@ -411,16 +365,14 @@ app_state = AppState()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan context manager for startup/shutdown."""
     logger.info("🚀 Qwen Daemon starting...")
-    logger.info(f"   Available profiles: {list(AGENT_PROFILES.keys())}")
-    logger.info(f"   Available tools: {list(ALL_TOOL_SPECS.keys())}")
+    logger.info(f"   Available profiles: {list(ALL_PROFILES.keys())}")
+    logger.info(f"   Available tools: {get_registry().available_tools}")
     
-    # Prune ALL empty sessions on startup (max_age=0 means delete all empty)
     store = get_session_store()
     pruned = store.prune_empty(max_age_seconds=0)
     if pruned > 0:
         logger.info(f"   🗑️ Pruned {pruned} empty session(s) on startup")
     
-    # Pre-load the model at startup so first request doesn't freeze
     logger.info("   Loading model (this may take 30-60 seconds)...")
     start_time = time.time()
     _ = app_state.get_chat_service(ModelSize.LARGE)
@@ -429,10 +381,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     
     yield
     
-    # Cleanup browser on shutdown
     logger.info("👋 Qwen Daemon shutting down...")
     try:
-        from .browser import get_browser_manager
+        from .tools.browser.manager import get_browser_manager
         browser_manager = get_browser_manager()
         if browser_manager.is_running:
             await browser_manager.close()
@@ -443,42 +394,168 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="Qwen Daemon",
     description="Unified LLM service with centralized tools and prompts",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 
-# --- Endpoints ---
+# --- Health Endpoint ---
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """Health check endpoint with model status."""
-    is_gen = app_state.is_generating
-    logger.debug(f"GET /health - model_loaded={app_state.model_loaded}, generating={is_gen}")
     return HealthResponse(
         status="healthy",
         model_loaded=app_state.model_loaded,
         model_size=(
             app_state.current_model_size.name if app_state.current_model_size else None
         ),
-        generation_in_progress=is_gen,
-        available_profiles=list(AGENT_PROFILES.keys()),
+        generation_in_progress=app_state.is_generating,
+        available_profiles=list(ALL_PROFILES.keys()),
         available_tools=get_registry().available_tools,
     )
 
 
-@app.post("/v1/chat", response_model=ChatResponseModel)
-async def chat(request: ChatRequest) -> ChatResponseModel:
-    """
-    Chat completion endpoint.
+# --- Tool API Endpoints (Local-Only) ---
 
-    Processes user message with the specified agent profile,
-    executing tools as needed and returning the final response.
+
+@app.get("/v1/tools", response_model=list[ToolInfo])
+async def list_tools() -> list[ToolInfo]:
+    """List all available tools with their specs."""
+    registry = get_registry()
+    specs = registry.get_all_specs()
+    return [
+        ToolInfo(
+            name=spec.name,
+            description=spec.description,
+            parameters=spec.parameters,
+        )
+        for spec in specs.values()
+    ]
+
+
+@app.get("/v1/tools/{tool_name}", response_model=ToolInfo)
+async def get_tool(tool_name: str) -> ToolInfo:
+    """Get a specific tool's spec by name."""
+    registry = get_registry()
+    spec = registry.get_spec(tool_name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown tool: {tool_name}")
+    return ToolInfo(
+        name=spec.name,
+        description=spec.description,
+        parameters=spec.parameters,
+    )
+
+
+@app.post("/v1/tools/{tool_name}/invoke", response_model=ToolInvokeResponse)
+async def invoke_tool_by_name(tool_name: str, request: ToolInvokeRequest) -> ToolInvokeResponse:
+    """
+    Invoke a specific tool directly (local-only API).
+    
+    This endpoint allows direct tool execution without LLM involvement.
+    Supports both sync and async tools.
     """
     start_time = time.perf_counter()
 
-    # Parse model size
+    registry = get_registry()
+    if tool_name not in registry.available_tools:
+        raise HTTPException(status_code=404, detail=f"Unknown tool: {tool_name}")
+
+    result = await registry.execute_async(tool_name, request.arguments)
+
+    parsed_result: Any
+    try:
+        parsed_result = json.loads(result)
+    except json.JSONDecodeError:
+        parsed_result = result
+
+    latency_ms = (time.perf_counter() - start_time) * 1000
+
+    return ToolInvokeResponse(
+        tool_name=tool_name,
+        result=parsed_result,
+        latency_ms=latency_ms,
+    )
+
+
+@app.post("/v1/invoke-tool", response_model=ToolInvokeResponse)
+async def invoke_tool_legacy(request: LegacyToolInvokeRequest) -> ToolInvokeResponse:
+    """
+    Legacy tool invocation endpoint (for backwards compatibility).
+    
+    Use POST /v1/tools/{name}/invoke instead.
+    """
+    start_time = time.perf_counter()
+
+    registry = get_registry()
+    if request.tool_name not in registry.available_tools:
+        raise HTTPException(status_code=404, detail=f"Unknown tool: {request.tool_name}")
+
+    result = await registry.execute_async(request.tool_name, request.arguments)
+
+    parsed_result: Any
+    try:
+        parsed_result = json.loads(result)
+    except json.JSONDecodeError:
+        parsed_result = result
+
+    latency_ms = (time.perf_counter() - start_time) * 1000
+
+    return ToolInvokeResponse(
+        tool_name=request.tool_name,
+        result=parsed_result,
+        latency_ms=latency_ms,
+    )
+
+
+# --- Profile Endpoints ---
+
+
+@app.get("/v1/profiles", response_model=list[ProfileInfo])
+async def list_profiles() -> list[ProfileInfo]:
+    """List available agent profiles."""
+    return [
+        ProfileInfo(
+            name=profile.name,
+            system_prompt_preview=(
+                profile.system_prompt[:200] + "..."
+                if len(profile.system_prompt) > 200
+                else profile.system_prompt
+            ),
+            tool_names=list(profile.tool_names),
+            max_tool_rounds=profile.max_tool_rounds,
+        )
+        for profile in ALL_PROFILES.values()
+    ]
+
+
+@app.get("/v1/profiles/{profile_name}/tools", response_model=list[ToolInfo])
+async def get_profile_tools(profile_name: str) -> list[ToolInfo]:
+    """Get tools available for a specific profile."""
+    profile = get_profile(profile_name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Unknown profile: {profile_name}")
+
+    return [
+        ToolInfo(
+            name=tool.name,
+            description=tool.description,
+            parameters=tool.parameters,
+        )
+        for tool in profile.tools
+    ]
+
+
+# --- Chat Endpoint ---
+
+
+@app.post("/v1/chat", response_model=ChatResponseModel)
+async def chat(request: ChatRequest) -> ChatResponseModel:
+    """Chat completion endpoint."""
+    start_time = time.perf_counter()
+
     size_map: dict[str, ModelSize] = {
         "small": ModelSize.SMALL,
         "medium": ModelSize.MEDIUM,
@@ -490,21 +567,17 @@ async def chat(request: ChatRequest) -> ChatResponseModel:
             status_code=400, detail=f"Invalid model_size: {request.model_size}"
         )
 
-    # Validate profile
-    if request.profile not in AGENT_PROFILES:
+    if request.profile not in ALL_PROFILES:
         raise HTTPException(
             status_code=400, detail=f"Unknown profile: {request.profile}"
         )
 
-    # Get chat service (loads model if needed)
     service = app_state.get_chat_service(model_size)
 
-    # Convert history
     history: list[ChatMessage] = [
         ChatMessage(m.role, m.content) for m in request.history
     ]
 
-    # Process chat using async method (supports async tools like browser)
     result = await service.chat_async(
         user_message=request.message,
         profile_name=request.profile,
@@ -527,90 +600,6 @@ async def chat(request: ChatRequest) -> ChatResponseModel:
         finished=result.finished,
         latency_ms=latency_ms,
     )
-
-
-@app.post("/v1/invoke-tool", response_model=ToolInvokeResponse)
-async def invoke_tool(request: ToolInvokeRequest) -> ToolInvokeResponse:
-    """
-    Direct tool invocation endpoint.
-
-    Executes a tool directly without LLM involvement.
-    Useful for testing tools or scripted workflows.
-    Supports both sync and async tools.
-    """
-    start_time = time.perf_counter()
-
-    registry = get_registry()
-    if request.tool_name not in registry.available_tools:
-        raise HTTPException(
-            status_code=404, detail=f"Unknown tool: {request.tool_name}"
-        )
-
-    # Use async execution to support both sync and async tools
-    result = await registry.execute_async(request.tool_name, request.arguments)
-
-    # Parse result if it's JSON
-    parsed_result: Any
-    try:
-        parsed_result = json.loads(result)
-    except json.JSONDecodeError:
-        parsed_result = result
-
-    latency_ms = (time.perf_counter() - start_time) * 1000
-
-    return ToolInvokeResponse(
-        tool_name=request.tool_name,
-        result=parsed_result,
-        latency_ms=latency_ms,
-    )
-
-
-@app.get("/v1/profiles", response_model=list[ProfileInfo])
-async def list_profiles() -> list[ProfileInfo]:
-    """List available agent profiles."""
-    return [
-        ProfileInfo(
-            name=name,
-            system_prompt_preview=(
-                profile.system_prompt[:200] + "..."
-                if len(profile.system_prompt) > 200
-                else profile.system_prompt
-            ),
-            tool_names=list(profile.tool_names),
-            max_tool_rounds=profile.max_tool_rounds,
-        )
-        for name, profile in AGENT_PROFILES.items()
-    ]
-
-
-@app.get("/v1/tools", response_model=list[ToolInfo])
-async def list_tools() -> list[ToolInfo]:
-    """List available tools."""
-    return [
-        ToolInfo(
-            name=spec.name,
-            description=spec.description,
-            parameters=spec.parameters,
-        )
-        for spec in ALL_TOOL_SPECS.values()
-    ]
-
-
-@app.get("/v1/profiles/{profile_name}/tools", response_model=list[ToolInfo])
-async def get_profile_tools(profile_name: str) -> list[ToolInfo]:
-    """Get tools available for a specific profile."""
-    if profile_name not in AGENT_PROFILES:
-        raise HTTPException(status_code=404, detail=f"Unknown profile: {profile_name}")
-
-    tools = get_tools_for_profile(profile_name)
-    return [
-        ToolInfo(
-            name=spec.name,
-            description=spec.description,
-            parameters=spec.parameters,
-        )
-        for spec in tools
-    ]
 
 
 # --- Session Endpoints ---
@@ -640,29 +629,18 @@ def _session_to_model(session: Session) -> SessionModel:
 
 @app.get("/v1/generation/status", response_model=GenerationStatus)
 async def get_generation_status() -> GenerationStatus:
-    """
-    Get current generation queue status.
-
-    Returns:
-    - generating_session_id: Session currently generating (or null if idle)
-    - queued_session_ids: Sessions waiting for their turn
-    """
-    status = app_state.get_generation_status()
-    if status.generating_session_id or status.queued_session_ids:
-        logger.debug(f"GET /v1/generation/status - generating={status.generating_session_id[:8] if status.generating_session_id else None}, queued={len(status.queued_session_ids)}")
-    return status
+    """Get current generation queue status."""
+    return app_state.get_generation_status()
 
 
 @app.get("/v1/sessions", response_model=list[SessionSummaryModel])
 async def list_sessions(limit: int = 50) -> list[SessionSummaryModel]:
     """List all sessions (summaries only, sorted by most recent)."""
     store = get_session_store()
-    # Prune empty sessions older than 60 seconds before listing
     pruned = store.prune_empty(max_age_seconds=60)
     if pruned > 0:
         logger.info(f"🗑️ Pruned {pruned} empty session(s)")
     summaries = store.list_summaries(limit=limit)
-    logger.debug(f"GET /v1/sessions - returning {len(summaries)} sessions")
     return [
         SessionSummaryModel(
             id=s["id"],
@@ -679,7 +657,7 @@ async def list_sessions(limit: int = 50) -> list[SessionSummaryModel]:
 @app.post("/v1/sessions", response_model=SessionModel)
 async def create_session(request: CreateSessionRequest) -> SessionModel:
     """Create a new session."""
-    if request.profile_name not in AGENT_PROFILES:
+    if request.profile_name not in ALL_PROFILES:
         raise HTTPException(
             status_code=400, detail=f"Unknown profile: {request.profile_name}"
         )
@@ -711,24 +689,10 @@ async def delete_session(session_id: str) -> dict[str, bool]:
 
 @app.post("/v1/sessions/{session_id}/chat", response_model=SessionChatResponse)
 async def session_chat(session_id: str, request: SessionChatRequest) -> SessionChatResponse:
-    """
-    Send a message in a session.
-
-    This endpoint:
-    1. Acquires the generation lock (only one generation at a time)
-    2. Loads the session from disk
-    3. Adds the user message
-    4. Generates a response using the model
-    5. Adds the assistant message
-    6. Saves the session to disk
-    7. Returns the updated session and response
-
-    If another generation is in progress, this request will wait (with timeout).
-    """
+    """Send a message in a session."""
     start_time = time.perf_counter()
-    logger.info(f"📨 POST /v1/sessions/{session_id[:8]}.../chat - message: {request.message[:50]}...")
+    logger.info(f"📨 POST /v1/sessions/{session_id[:8]}.../chat")
 
-    # Validate model size
     size_map: dict[str, ModelSize] = {
         "small": ModelSize.SMALL,
         "medium": ModelSize.MEDIUM,
@@ -736,88 +700,59 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
     }
     model_size = size_map.get(request.model_size.lower())
     if model_size is None:
-        logger.error(f"Invalid model_size: {request.model_size}")
         raise HTTPException(
             status_code=400, detail=f"Invalid model_size: {request.model_size}"
         )
 
-    # Load session
     store = get_session_store()
     session = store.get(session_id)
     if session is None:
-        logger.error(f"Session not found: {session_id}")
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
-    logger.debug(f"Loaded session: profile={session.profile_name}, messages={len(session.messages)}")
-
-    # Validate profile
-    if session.profile_name not in AGENT_PROFILES:
-        logger.error(f"Unknown profile: {session.profile_name}")
+    if session.profile_name not in ALL_PROFILES:
         raise HTTPException(
             status_code=400, detail=f"Unknown profile: {session.profile_name}"
         )
 
-    # Add user message immediately (before generation)
     session.add_message(role="user", content=request.message)
-    logger.debug(f"Added user message to session, now has {len(session.messages)} messages")
 
-    # Add to queue and get position atomically
     queue_position = app_state.add_to_queue(session_id)
     queue_enter_time = time.perf_counter()
 
-    # Cooperative yield: let other concurrent requests add to queue
-    # before we try to acquire the generation lock. Without this,
-    # the first request acquires the lock immediately and runs its
-    # synchronous model generation to completion before any other
-    # request even calls add_to_queue().
     await asyncio.sleep(0)
 
-    logger.debug(f"Session {session_id[:8]} waiting for generation lock...")
-
-    # Track whether we acquired the lock (for cleanup in timeout handler)
     acquired_lock = False
 
-    # Acquire generation lock with timeout
-    # 30 minute timeout covers both lock wait AND generation
-    # Complex browser automation tasks can take 10+ minutes per tool call
     try:
         async with asyncio.timeout(1800):
             async with app_state.generation_lock:
                 acquired_lock = True
-                # Calculate queue wait time
                 lock_acquired_time = time.perf_counter()
                 queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
-                was_queued = queue_wait_ms > 10  # Consider >10ms as "was queued"
+                was_queued = queue_wait_ms > 10
                 
-                logger.info(f"🔓 Session {session_id[:8]} acquired lock (waited {queue_wait_ms:.0f}ms, position={queue_position})")
+                logger.info(f"🔓 Session {session_id[:8]} acquired lock (waited {queue_wait_ms:.0f}ms)")
 
-                # Mark as generating (moves from queued to generating)
                 app_state.set_generating(True, session_id=session_id)
                 try:
-                    # Get chat service (loads model if needed)
                     service = app_state.get_chat_service(model_size)
 
-                    # Build history from session messages
                     history: list[ChatMessage] = [
                         ChatMessage(msg.role, msg.content)
-                        for msg in session.messages[:-1]  # Exclude the user message we just added
+                        for msg in session.messages[:-1]
                     ]
 
-                    logger.info(f"🤖 Starting generation for session {session_id[:8]} with {len(history)} history messages...")
-                    gen_start = time.perf_counter()
-                    
-                    # Generate response using async chat (supports async tools like browser)
-                    result = await service.chat_async(
-                        user_message=request.message,
-                        profile_name=session.profile_name,
-                        conversation_history=history,
-                        verbose=request.verbose,
-                    )
-                    
-                    gen_elapsed = (time.perf_counter() - gen_start) * 1000
-                    logger.info(f"🤖 Generation complete for session {session_id[:8]} in {gen_elapsed:.0f}ms (rounds={result.rounds_used}, tools={len(result.tool_calls)})")
+                    context_token = set_session_context(session_id)
+                    try:
+                        result = await service.chat_async(
+                            user_message=request.message,
+                            profile_name=session.profile_name,
+                            conversation_history=history,
+                            verbose=request.verbose,
+                        )
+                    finally:
+                        reset_session_context(context_token)
 
-                    # Add assistant message
                     session.add_message(
                         role="assistant",
                         content=result.content,
@@ -825,36 +760,27 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                         tool_results=[{"tool_name": tr.tool_name, "result": tr.result} for tr in result.tool_results],
                     )
 
-                    # Save session
                     store.save(session)
-                    logger.debug(f"Session {session_id[:8]} saved with {len(session.messages)} messages")
 
                 finally:
-                    # Clear generation status (always runs if lock was acquired)
                     app_state.set_generating(False)
                     app_state.remove_from_queue(session_id)
 
     except asyncio.TimeoutError:
-        # Only cleanup if we never acquired the lock (timed out waiting)
-        # If we did acquire it, the finally block already handled cleanup
         if not acquired_lock:
-            logger.error(f"⏰ Session {session_id[:8]} timed out waiting for lock after 30 minutes")
             app_state.remove_from_queue(session_id)
             raise HTTPException(
                 status_code=503,
                 detail="Timed out after 30 minutes waiting for another request to finish.",
             )
         else:
-            # Timeout during generation (finally block already cleaned up)
-            logger.error(f"⏰ Session {session_id[:8]} generation timed out after 30 minutes")
             raise HTTPException(
                 status_code=503,
-                detail="Generation timed out after 30 minutes. Try a simpler request.",
+                detail="Generation timed out after 30 minutes.",
             )
 
     latency_ms = (time.perf_counter() - start_time) * 1000
 
-    # Build response
     chat_response = ChatResponseModel(
         content=result.content,
         tool_calls=[{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
@@ -879,28 +805,10 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
 
 @app.post("/v1/sessions/{session_id}/chat/stream")
 async def session_chat_stream(session_id: str, request: SessionChatRequest):
-    """
-    Send a message and stream generation progress via Server-Sent Events.
-    
-    This endpoint streams real-time events during generation:
-    - round_start: New inference round started
-    - generating: Model is thinking
-    - tool_start: Tool execution started
-    - tool_end: Tool execution finished
-    - complete: Generation finished (includes full session)
-    - error: An error occurred
-    
-    Events are sent as SSE (text/event-stream):
-        data: {"type": "generating", "round": 1, "max_rounds": 5}
-        
-        data: {"type": "tool_start", "tool_name": "browser_navigate", ...}
-        
-        data: {"type": "complete", "session": {...}, "response": {...}}
-    """
+    """Send a message and stream generation progress via Server-Sent Events."""
     start_time = time.perf_counter()
-    logger.info(f"📨 POST /v1/sessions/{session_id[:8]}.../chat/stream - message: {request.message[:50]}...")
+    logger.info(f"📨 POST /v1/sessions/{session_id[:8]}.../chat/stream")
 
-    # Validate model size
     size_map: dict[str, ModelSize] = {
         "small": ModelSize.SMALL,
         "medium": ModelSize.MEDIUM,
@@ -908,50 +816,36 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
     }
     model_size = size_map.get(request.model_size.lower())
     if model_size is None:
-        logger.error(f"Invalid model_size: {request.model_size}")
         raise HTTPException(
             status_code=400, detail=f"Invalid model_size: {request.model_size}"
         )
 
-    # Load session
     store = get_session_store()
     session = store.get(session_id)
     if session is None:
-        logger.error(f"Session not found: {session_id}")
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
-    logger.debug(f"Loaded session: profile={session.profile_name}, messages={len(session.messages)}")
-
-    # Validate profile
-    if session.profile_name not in AGENT_PROFILES:
-        logger.error(f"Unknown profile: {session.profile_name}")
+    if session.profile_name not in ALL_PROFILES:
         raise HTTPException(
             status_code=400, detail=f"Unknown profile: {session.profile_name}"
         )
 
-    # Add user message immediately (before generation)
     session.add_message(role="user", content=request.message)
-    logger.debug(f"Added user message to session, now has {len(session.messages)} messages")
 
-    # Add to queue and get position atomically
     queue_position = app_state.add_to_queue(session_id)
     queue_enter_time = time.perf_counter()
 
-    # Cooperative yield
     await asyncio.sleep(0)
 
     async def event_generator():
-        """Generator that yields SSE events during generation."""
-        nonlocal session  # Need to update session after generation
+        nonlocal session
         acquired_lock = False
         was_queued = False
         queue_wait_ms = 0.0
         
-        # Queue for events from chat_async callback
         event_queue: asyncio.Queue[dict] = asyncio.Queue()
         
         async def on_event(event: dict) -> None:
-            """Callback to receive events from chat_async."""
             await event_queue.put(event)
         
         try:
@@ -961,8 +855,6 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                     lock_acquired_time = time.perf_counter()
                     queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
                     was_queued = queue_wait_ms > 10
-                    
-                    logger.info(f"🔓 [STREAM] Session {session_id[:8]} acquired lock (waited {queue_wait_ms:.0f}ms)")
                     
                     app_state.set_generating(True, session_id=session_id)
                     
@@ -974,42 +866,35 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                             for msg in session.messages[:-1]
                         ]
                         
-                        logger.info(f"🤖 [STREAM] Starting generation for session {session_id[:8]}...")
-                        gen_start = time.perf_counter()
+                        context_token = set_session_context(session_id)
                         
-                        # Create a task for chat_async that puts events in the queue
                         async def run_chat():
-                            return await service.chat_async(
-                                user_message=request.message,
-                                profile_name=session.profile_name,
-                                conversation_history=history,
-                                verbose=request.verbose,
-                                on_event=on_event,
-                            )
+                            try:
+                                return await service.chat_async(
+                                    user_message=request.message,
+                                    profile_name=session.profile_name,
+                                    conversation_history=history,
+                                    verbose=request.verbose,
+                                    on_event=on_event,
+                                )
+                            finally:
+                                reset_session_context(context_token)
                         
                         chat_task = asyncio.create_task(run_chat())
                         
-                        # Stream events as they arrive
                         while not chat_task.done():
                             try:
-                                # Wait for event with short timeout so we can check if task is done
                                 event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                                 yield f"data: {json.dumps(event)}\n\n"
                             except asyncio.TimeoutError:
                                 continue
                         
-                        # Drain any remaining events
                         while not event_queue.empty():
                             event = event_queue.get_nowait()
                             yield f"data: {json.dumps(event)}\n\n"
                         
-                        # Get the result
                         result = await chat_task
                         
-                        gen_elapsed = (time.perf_counter() - gen_start) * 1000
-                        logger.info(f"🤖 [STREAM] Generation complete in {gen_elapsed:.0f}ms")
-                        
-                        # Add assistant message
                         session.add_message(
                             role="assistant",
                             content=result.content,
@@ -1017,10 +902,8 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                             tool_results=[{"tool_name": tr.tool_name, "result": tr.result} for tr in result.tool_results],
                         )
                         
-                        # Save session
                         store.save(session)
                         
-                        # Send complete event
                         latency_ms = (time.perf_counter() - start_time) * 1000
                         complete_event = GenerationEvent(
                             type="complete",
@@ -1047,7 +930,6 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                         
         except asyncio.TimeoutError:
             if not acquired_lock:
-                logger.error(f"⏰ [STREAM] Session {session_id[:8]} timed out waiting for lock")
                 app_state.remove_from_queue(session_id)
                 error_event = GenerationEvent(
                     type="error",
@@ -1055,10 +937,9 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                 )
                 yield f"data: {error_event.model_dump_json()}\n\n"
             else:
-                logger.error(f"⏰ [STREAM] Session {session_id[:8]} generation timed out")
                 error_event = GenerationEvent(
                     type="error",
-                    error="Generation timed out after 30 minutes. Try a simpler request.",
+                    error="Generation timed out after 30 minutes.",
                 )
                 yield f"data: {error_event.model_dump_json()}\n\n"
         except Exception as e:
@@ -1075,7 +956,7 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -1091,7 +972,6 @@ def main() -> None:
     host = "127.0.0.1"
     port = 5997
 
-    # Parse CLI args
     args = sys.argv[1:]
     i = 0
     while i < len(args):
