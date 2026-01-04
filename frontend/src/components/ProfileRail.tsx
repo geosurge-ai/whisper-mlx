@@ -103,7 +103,7 @@ export function ProfileRail({
           </button>
         </div>
 
-        {sessionsLoading ? (
+        {sessionsLoading && profileSessions.length === 0 ? (
           <div className="profile-rail-loading">
             <span>Loading...</span>
           </div>

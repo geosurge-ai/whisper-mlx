@@ -9,7 +9,7 @@
  * - Bauhaus-inspired design with generous spacing
  */
 
-import { useState, useRef, useEffect, useCallback, FormEvent } from 'react'
+import { useState, useRef, useEffect, useCallback, FormEvent, memo } from 'react'
 import type { ToolCallInfo, ToolResultInfo } from '../api'
 import './ChatView.css'
 
@@ -146,8 +146,10 @@ export function ChatView({
 }
 
 // --- Message Bubble ---
+// Memoized to prevent re-renders when parent re-renders with same message data
+// This preserves local state like expandedToolCall
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const [expandedToolCall, setExpandedToolCall] = useState<number | null>(null)
 
   return (
@@ -215,7 +217,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       </div>
     </div>
   )
-}
+})
 
 // --- Empty State ---
 

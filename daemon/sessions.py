@@ -263,6 +263,34 @@ class SessionStore:
 
         return summaries[:limit]
 
+    def prune_empty(self, max_age_seconds: float = 1800) -> int:
+        """
+        Delete empty sessions older than max_age_seconds.
+
+        Args:
+            max_age_seconds: Maximum age in seconds for empty sessions (default 30 min).
+
+        Returns:
+            Number of sessions deleted.
+        """
+        now = datetime.now().timestamp()
+        deleted = 0
+
+        for path in self._sessions_dir.glob("*.json"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Only prune sessions with no messages
+                if len(data.get("messages", [])) == 0:
+                    age = now - data["updated_at"]
+                    if age > max_age_seconds:
+                        path.unlink()
+                        deleted += 1
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        return deleted
+
 
 # --- Singleton Instance ---
 
