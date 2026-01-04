@@ -411,7 +411,7 @@ class ChatService:
             if thinking:
                 await emit({
                     "type": "thinking",
-                    "content": thinking[:2000],
+                    "content": thinking,  # Never truncate thinking content
                     "round": round_num + 1,
                     "max_rounds": max_rounds,
                 })
@@ -490,26 +490,15 @@ class ChatService:
         )
 
 
-def _truncate_args(args: dict[str, Any], max_len: int = 200) -> dict[str, Any]:
-    """Truncate large argument values for SSE streaming."""
-    truncated: dict[str, Any] = {}
-    for key, value in args.items():
-        if isinstance(value, str):
-            if key == 'code':
-                truncated[key] = value
-            elif len(value) > max_len:
-                truncated[key] = value[:max_len] + "..."
-            else:
-                truncated[key] = value
-        else:
-            truncated[key] = value
-    return truncated
+def _truncate_args(args: dict[str, Any], max_len: int = 0) -> dict[str, Any]:
+    """Return full argument values for SSE streaming (no truncation)."""
+    # Never truncate - UI can handle display
+    return args
 
 
-def _truncate_result(result: str, max_len: int = 500) -> str:
-    """Truncate tool result for SSE streaming."""
-    if len(result) > max_len:
-        return result[:max_len] + "..."
+def _truncate_result(result: str, max_len: int = 0) -> str:
+    """Return full tool result for SSE streaming (no truncation)."""
+    # Never truncate - UI can handle display
     return result
 
 
