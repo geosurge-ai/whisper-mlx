@@ -76,3 +76,5 @@ notes/
 
 *.txt
 !requirements.txt
+# Runtime data
+data/
