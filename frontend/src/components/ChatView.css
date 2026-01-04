@@ -216,6 +216,13 @@
   animation-delay: 0.4s;
 }
 
+.chat-loading-status {
+  margin-left: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
 @keyframes bounce {
 
   0%,
@@ -227,6 +234,46 @@
   40% {
     transform: translateY(-6px);
   }
+}
+
+/* --- Generating Elsewhere Indicator --- */
+
+.chat-generating-elsewhere {
+  display: flex;
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  background-color: var(--color-bg-tertiary);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  max-width: var(--max-content-width);
+}
+
+.chat-generating-elsewhere-content {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.chat-generating-elsewhere-icon {
+  font-size: var(--text-base);
+}
+
+.chat-generating-elsewhere-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.chat-generating-elsewhere-link {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-secondary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color var(--transition-fast);
+}
+
+.chat-generating-elsewhere-link:hover {
+  color: var(--color-primary);
 }
 
 /* --- Empty State --- */

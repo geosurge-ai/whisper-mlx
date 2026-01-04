@@ -69,26 +69,59 @@ class ModelSize(Enum):
 
 # --- System Prompts ---
 
-MIRROR_SYSTEM_PROMPT = """You are a knowledge assistant with access to your team's Linear issues and Slack conversations.
+MIRROR_SYSTEM_PROMPT = """You are a knowledge assistant with access to your team's Linear issues and Slack conversations, plus Python for data analysis.
 
 ## Your Data Sources
 
 1. **Linear Mirror**: All issues, comments, and activity events from your Linear workspace
 2. **Slack Mirror**: Conversations and threads from your Slack workspace
+3. **Python**: Full data science environment for analysis and visualization
 
 ## How to Answer Questions
 
-1. **Search first**: Use search tools to find relevant issues or messages before answering
-2. **Drill down**: Use get_linear_issue or get_slack_thread for full details when needed
-3. **Synthesize**: Combine information from multiple sources to give complete answers
-4. **Be transparent**: Say when information might be incomplete or outdated (mirrors sync periodically)
+1. **Orient in time first**: Use get_current_datetime when questions involve time ("last week", "this month", "recently")
+2. **Search first**: Use search tools to find relevant issues or messages before answering
+3. **Drill down**: Use get_linear_issue or get_slack_thread for full details when needed
+4. **Analyze with Python**: Use run_python for calculations, statistics, or data transformations
+5. **Synthesize**: Combine information from multiple sources to give complete answers
+6. **Be transparent**: Say when information might be incomplete or outdated (mirrors sync periodically)
 
 ## Tool Strategy
 
+- For time-based questions → get_current_datetime FIRST, then other tools
 - For questions about project status → search_linear_issues + get_linear_issue
 - For "what happened" questions → list_linear_events
 - For conversation/discussion questions → search_slack_messages + get_slack_thread
+- For "what are people talking about" / browsing questions → list_recent_slack_activity
 - For people questions → lookup_user
+- For calculations, statistics, charts → run_python
+
+## Python Capabilities (run_python)
+
+You have a full Python environment with:
+- **pandas**: DataFrames, data manipulation, time series
+- **numpy**: Numerical computing, arrays, linear algebra
+- **scipy**: Scientific computing, statistics, optimization
+- **matplotlib/seaborn**: Static charts and statistical plots
+- **plotly**: Interactive visualizations
+
+Use Python to:
+- Calculate statistics from collected data
+- Transform and analyze JSON results from other tools
+- Create visualizations (save to files if needed)
+- Perform complex date/time calculations
+
+## Pagination Strategy (IMPORTANT)
+
+Results are paginated to fit your context window. When browsing or summarizing:
+
+1. **Start small**: Request page 0 first with a reasonable limit (10-15 items)
+2. **Scan for themes**: Look for recurring topics, active discussions, key people
+3. **Go deeper selectively**: Only fetch more pages if needed for specific topics
+4. **Summarize as you go**: Don't try to load everything - synthesize themes from samples
+5. **Use search to focus**: Once you identify themes, use search_slack_messages to find more on specific topics
+
+For "what's happening" questions: 2-3 pages of recent activity is usually enough to identify major themes.
 
 ## Response Style
 
@@ -145,6 +178,33 @@ GENERAL_ASSISTANT_PROMPT = (
 # Mirror tools (Linear/Slack knowledge base)
 MIRROR_TOOL_SPECS = (
     ToolSpec(
+        name="get_current_datetime",
+        description="Get the current date and time. ALWAYS call this first when answering questions about time periods like 'last week', 'this month', 'past 2 months', 'recently', etc. Returns UTC and local time with helpful date range hints.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    ToolSpec(
+        name="run_python",
+        description="Execute Python code and return output. Full Python environment with pandas, numpy, scipy, matplotlib, seaborn, plotly available. Use for data analysis, calculations, statistics, or generating visualizations. Use print() for output.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code to execute. Use print() for output. Can import any installed package.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Max execution time in seconds (default 30)",
+                },
+            },
+            "required": ["code"],
+        },
+    ),
+    ToolSpec(
         name="search_linear_issues",
         description="Search Linear issues by keyword. Supports filtering by state (e.g., 'In Progress'), assignee name, and label. Returns paginated summary results - use get_linear_issue for full details.",
         parameters={
@@ -194,13 +254,13 @@ MIRROR_TOOL_SPECS = (
     ),
     ToolSpec(
         name="list_linear_events",
-        description="List recent Linear activity: state changes, assignments, comments, etc. Good for understanding what happened recently.",
+        description="List recent Linear activity: state changes, assignments, comments, etc. Good for understanding what happened recently. Use get_current_datetime first to understand 'today'.",
         parameters={
             "type": "object",
             "properties": {
                 "since_days": {
                     "type": "integer",
-                    "description": "How many days back to look (default 7)",
+                    "description": "How many days back to look (default 7, no limit)",
                 },
                 "event_type": {
                     "type": "string",
@@ -264,6 +324,32 @@ MIRROR_TOOL_SPECS = (
                 },
             },
             "required": ["channel_id", "thread_ts"],
+        },
+    ),
+    ToolSpec(
+        name="list_recent_slack_activity",
+        description="List recent Slack messages without needing a search query. Use this to see what people are talking about, get a pulse on team discussions, or answer 'what's happening on Slack' questions. Use pagination to browse more - start with page 0, then 1, 2, etc. Use get_current_datetime first to understand 'today'.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "since_days": {
+                    "type": "integer",
+                    "description": "How many days back to look (default 7, no limit)",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Optional channel ID to limit to a specific channel",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per page (default 15, keep small to fit context)",
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Page number for pagination (0-indexed). Use to browse more messages.",
+                },
+            },
+            "required": [],
         },
     ),
     ToolSpec(

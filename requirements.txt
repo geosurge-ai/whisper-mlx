@@ -13,6 +13,16 @@ pydantic>=2.0.0
 ddgs>=6.0.0          # DuckDuckGo search (code_runner_agent)
 playwright>=1.40.0    # Browser automation (code_runner_agent)
 
+# Data Science (for run_python tool)
+pandas>=2.2.0        # DataFrames and data manipulation
+numpy>=1.26.0        # Numerical computing
+scipy>=1.12.0        # Scientific computing
+matplotlib>=3.8.0    # Static plotting
+seaborn>=0.13.0      # Statistical visualization
+plotly>=5.18.0       # Interactive charts
+pyarrow>=15.0.0      # Arrow format, Parquet support
+kaleido>=0.2.1       # Plotly static image export
+
 # Development & Testing
 httpx>=0.27.0        # For async client testing
 pytest>=8.0.0        # Test framework

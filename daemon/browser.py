@@ -45,9 +45,41 @@ class BrowserManager:
     Lazy initialization - browser is created on first tool use.
     All sessions share the same browser context for simplicity.
     Uses a context with clipboard permissions for paste operations.
+    
+    Cookie consent popups are handled by:
+    1. Blocking common consent management platform (CMP) scripts via route interception
+    2. Blocking service workers that might bypass route blocking
+    3. Fallback button clicking for any popups that slip through
     """
 
     _instance: BrowserManager | None = None
+    
+    # Common consent management platform domains/patterns to block
+    CMP_BLOCK_PATTERNS: list[str] = [
+        # Major CMPs
+        "**/cdn.cookielaw.org/**",
+        "**/cookielaw.org/**",
+        "**/onetrust.com/**",
+        "**/consent.cookiebot.com/**",
+        "**/cookiebot.com/**",
+        "**/consent.trustarc.com/**",
+        "**/trustarc.com/**",
+        "**/quantcast.com/choice/**",
+        "**/cdn-cookieyes.com/**",
+        "**/cookieyes.com/**",
+        "**/cmp.osano.com/**",
+        "**/osano.com/**",
+        "**/privacy-mgmt.com/**",
+        "**/sp-prod.net/**",
+        "**/sourcepoint.com/**",
+        # Generic patterns
+        "**/*cookie*consent*.js",
+        "**/*cookie*banner*.js",
+        "**/*cookie*notice*.js",
+        "**/*gdpr*.js",
+        "**/*cookie-law*.js",
+        "**/*cookieconsent*.js",
+    ]
 
     def __init__(self) -> None:
         self._playwright: Playwright | None = None
@@ -62,18 +94,38 @@ class BrowserManager:
             cls._instance = cls()
         return cls._instance
 
+    async def _setup_route_blocking(self, context: BrowserContext) -> None:
+        """Block common consent management platform scripts via route interception."""
+        blocked_count = 0
+        
+        async def block_handler(route) -> None:
+            nonlocal blocked_count
+            blocked_count += 1
+            logger.debug(f"[BLOCK] Blocked CMP script: {route.request.url[:80]}...")
+            await route.abort()
+        
+        for pattern in self.CMP_BLOCK_PATTERNS:
+            await context.route(pattern, block_handler)
+        
+        logger.info(f"🛡️ Set up blocking for {len(self.CMP_BLOCK_PATTERNS)} CMP patterns")
+
     async def ensure_browser(self) -> Page:
         """Ensure browser is running and return the page."""
         if self._page is None:
             logger.info("🌐 Launching browser (visible mode)...")
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(headless=False)
-            # Create context with clipboard permissions for paste operations
+            # Create context with:
+            # - Clipboard permissions for paste operations
+            # - Service workers blocked (they can bypass route interception)
             self._context = await self._browser.new_context(
-                permissions=["clipboard-read", "clipboard-write"]
+                permissions=["clipboard-read", "clipboard-write"],
+                service_workers="block",
             )
+            # Set up route blocking for consent management platforms
+            await self._setup_route_blocking(self._context)
             self._page = await self._context.new_page()
-            logger.info("✅ Browser ready")
+            logger.info("✅ Browser ready (with CMP blocking)")
         return self._page
 
     async def close(self) -> None:
@@ -145,29 +197,77 @@ async def browser_navigate(url: str) -> str:
         # Wait for page to be fully loaded (but don't require network silence)
         await page.wait_for_load_state("load", timeout=30000)
 
-        # Auto-dismiss common cookie/consent popups using combined locator
-        # This is much faster than checking 18 selectors in a loop
+        # Layer 1: Inject CSS to hide common cookie popup containers
+        # This runs immediately and catches most popups before they fully render
+        await page.add_style_tag(content="""
+            [class*="cookie-banner"], [class*="cookie-consent"], [class*="cookie-notice"],
+            [class*="cookiebanner"], [class*="cookieconsent"], [class*="cookienotice"],
+            [id*="cookie-banner"], [id*="cookie-consent"], [id*="cookie-notice"],
+            [id*="cookiebanner"], [id*="cookieconsent"], [id*="cookienotice"],
+            [class*="gdpr"], [id*="gdpr"],
+            [class*="consent-banner"], [id*="consent-banner"],
+            [class*="privacy-banner"], [id*="privacy-banner"],
+            .cc-window, .cc-banner, #CybotCookiebotDialog,
+            #onetrust-consent-sdk, .onetrust-pc-dark-filter,
+            [aria-label*="cookie" i], [aria-label*="consent" i] {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+            }
+        """)
+        logger.debug("[NAV] Injected CSS to hide cookie popups")
+
+        # Layer 2: Try to click dismiss buttons for any popups that slip through
+        # Expanded list of button patterns
         cookie_button = (
+            # Common accept patterns
             page.get_by_role("button", name="Accept all")
             .or_(page.get_by_role("button", name="Accept All"))
             .or_(page.get_by_role("button", name="Accept"))
+            .or_(page.get_by_role("button", name="Accept Cookies"))
+            .or_(page.get_by_role("button", name="Accept cookies"))
+            # Agree patterns
             .or_(page.get_by_role("button", name="I agree"))
-            .or_(page.get_by_role("button", name="Got it"))
-            .or_(page.get_by_role("button", name="OK"))
-            .or_(page.get_by_role("button", name="Continue"))
+            .or_(page.get_by_role("button", name="Agree"))
             .or_(page.get_by_role("button", name="AGREE AND PROCEED"))
+            .or_(page.get_by_role("button", name="Agree and proceed"))
+            # Allow patterns
+            .or_(page.get_by_role("button", name="Allow all"))
+            .or_(page.get_by_role("button", name="Allow All"))
+            .or_(page.get_by_role("button", name="Allow cookies"))
+            .or_(page.get_by_role("button", name="Allow Cookies"))
+            # Continue/OK patterns
+            .or_(page.get_by_role("button", name="Continue"))
+            .or_(page.get_by_role("button", name="Continue with Recommended Cookies"))
+            .or_(page.get_by_role("button", name="OK"))
+            .or_(page.get_by_role("button", name="Got it"))
+            .or_(page.get_by_role("button", name="Got It"))
+            # Consent patterns
+            .or_(page.get_by_role("button", name="Consent"))
+            .or_(page.get_by_role("button", name="I consent"))
+            # Close patterns
+            .or_(page.get_by_role("button", name="Close"))
+            .or_(page.get_by_role("button", name="Dismiss"))
+            # Common CMP-specific selectors
             .or_(page.locator("#onetrust-accept-btn-handler"))
+            .or_(page.locator("#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll"))
             .or_(page.locator(".cc-accept"))
+            .or_(page.locator(".cc-btn.cc-dismiss"))
             .or_(page.locator("#accept-cookies"))
+            .or_(page.locator("[data-cookiebanner='accept_button']"))
+            # Generic fallback - any button in a cookie-related container
+            .or_(page.locator("[class*='cookie'] button[class*='accept']"))
+            .or_(page.locator("[class*='consent'] button[class*='accept']"))
         )
         try:
             # Short timeout - if no popup, move on quickly
-            await cookie_button.first.click(timeout=3000)
-            logger.info("[NAV] Dismissed cookie popup")
+            await cookie_button.first.click(timeout=2000)
+            logger.info("[NAV] Dismissed cookie popup via click")
             # Wait for popup to close
-            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            await page.wait_for_load_state("domcontentloaded", timeout=3000)
         except PlaywrightTimeout:
-            pass  # No cookie popup found, that's fine
+            pass  # No clickable cookie popup found, CSS hiding should have handled it
 
         return json.dumps({
             "status": "success",

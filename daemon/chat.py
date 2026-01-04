@@ -14,7 +14,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from .config import (
     AgentProfile,
@@ -362,6 +362,7 @@ class ChatService:
         profile_name: str = "general",
         conversation_history: list[ChatMessage] | None = None,
         verbose: bool = False,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> ChatResponse:
         """
         Process a chat message with the specified agent profile (async version).
@@ -374,6 +375,7 @@ class ChatService:
             profile_name: Name of agent profile to use
             conversation_history: Optional prior conversation context
             verbose: Whether to print debug info
+            on_event: Optional async callback for SSE event streaming
 
         Returns:
             ChatResponse with final content and metadata
@@ -390,6 +392,12 @@ class ChatService:
 
         tools = get_tools_for_profile(profile_name)
         system_prompt = build_system_prompt(profile, tools)
+        max_rounds = profile.max_tool_rounds
+
+        # Helper to emit events
+        async def emit(event: dict[str, Any]) -> None:
+            if on_event is not None:
+                await on_event(event)
 
         # Build initial conversation
         conversation: list[ChatMessage] = list(conversation_history or [])
@@ -399,12 +407,26 @@ class ChatService:
         all_tool_results: list[ToolResult] = []
         response: str = ""  # Initialize for type checker; always assigned in loop
 
-        for round_num in range(profile.max_tool_rounds):
+        for round_num in range(max_rounds):
+            # Emit round start event
+            await emit({
+                "type": "round_start",
+                "round": round_num + 1,
+                "max_rounds": max_rounds,
+            })
+
             # Build messages for model
             messages = self._build_messages(system_prompt, conversation)
 
             if verbose:
                 print(f"\n⏳ Round {round_num + 1} - Generating...")
+
+            # Emit generating event
+            await emit({
+                "type": "generating",
+                "round": round_num + 1,
+                "max_rounds": max_rounds,
+            })
 
             # Run model generation in thread pool (MLX-LM is synchronous)
             response = await asyncio.to_thread(
@@ -457,10 +479,28 @@ class ChatService:
             # Execute tools (async-aware)
             round_results: list[ToolResult] = []
             for tc in tool_calls:
+                # Emit tool_start event (truncate large args for SSE)
+                truncated_args = _truncate_args(tc.arguments)
+                await emit({
+                    "type": "tool_start",
+                    "tool_name": tc.name,
+                    "tool_args": truncated_args,
+                    "round": round_num + 1,
+                    "max_rounds": max_rounds,
+                })
+
                 result = await self._registry.execute_async(tc.name, tc.arguments)
                 round_results.append(ToolResult(tc.name, result))
                 all_tool_calls.append(tc)
                 all_tool_results.append(round_results[-1])
+
+                # Emit tool_end event
+                await emit({
+                    "type": "tool_end",
+                    "tool_name": tc.name,
+                    "round": round_num + 1,
+                    "max_rounds": max_rounds,
+                })
 
             if verbose:
                 print("📦 Tool results:")
@@ -480,6 +520,17 @@ class ChatService:
             rounds_used=profile.max_tool_rounds,
             finished=False,  # Hit limit, might not be complete
         )
+
+
+def _truncate_args(args: dict[str, Any], max_len: int = 200) -> dict[str, Any]:
+    """Truncate large argument values for SSE streaming."""
+    truncated: dict[str, Any] = {}
+    for key, value in args.items():
+        if isinstance(value, str) and len(value) > max_len:
+            truncated[key] = value[:max_len] + "..."
+        else:
+            truncated[key] = value
+    return truncated
 
 
 # --- Factory Functions ---

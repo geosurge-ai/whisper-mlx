@@ -11,6 +11,9 @@
 
 import { useState, useRef, useEffect, useCallback, FormEvent, memo } from 'react'
 import type { ToolCallInfo, ToolResultInfo } from '../api'
+import type { GenerationActivity } from '../hooks/useAppState'
+import { ActivityLog } from './ActivityLog'
+import { ToolCallResult } from './CollapsibleResult'
 import './ChatView.css'
 
 // --- Types ---
@@ -31,6 +34,14 @@ interface ChatViewProps {
   loading?: boolean
   error?: string | null
   onClearError?: () => void
+  // Generation activity (real-time SSE updates)
+  activity?: GenerationActivity
+  onClearActivityLog?: () => void
+  // Generation status for cross-session awareness
+  currentSessionId?: string | null
+  generatingSessionId?: string | null
+  generatingSessionTitle?: string | null
+  onGoToGeneratingSession?: () => void
 }
 
 // --- Component ---
@@ -42,15 +53,44 @@ export function ChatView({
   loading = false,
   error,
   onClearError,
+  activity,
+  onClearActivityLog,
+  currentSessionId,
+  generatingSessionId,
+  generatingSessionTitle,
+  onGoToGeneratingSession,
 }: ChatViewProps) {
   const [input, setInput] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const prevMessagesRef = useRef<{ sessionId: string | null | undefined; count: number; lastId: string | null }>({
+    sessionId: null,
+    count: 0,
+    lastId: null,
+  })
 
-  // Auto-scroll to bottom on new messages
+  // Determine if THIS session is the one generating (should block input)
+  // vs another session generating (should allow queueing)
+  const isThisSessionGenerating = loading && generatingSessionId === currentSessionId
+
+  // Auto-scroll to bottom only when:
+  // 1. New messages are added to the SAME session
+  // 2. User switches to a different session (scroll once to show latest)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    const prev = prevMessagesRef.current
+    const currentCount = messages.length
+    const currentLastId = messages[messages.length - 1]?.id ?? null
+    const sessionChanged = currentSessionId !== prev.sessionId
+    
+    // Scroll if: session changed OR new message added (by checking last message ID)
+    const shouldScroll = sessionChanged || (currentLastId !== prev.lastId && currentCount > prev.count)
+    
+    if (shouldScroll) {
+      messagesEndRef.current?.scrollIntoView({ behavior: sessionChanged ? 'auto' : 'smooth' })
+    }
+    
+    prevMessagesRef.current = { sessionId: currentSessionId, count: currentCount, lastId: currentLastId }
+  }, [messages, currentSessionId])
 
   // Focus input on mount
   useEffect(() => {
@@ -61,11 +101,11 @@ export function ChatView({
   const handleSubmit = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
     const message = input.trim()
-    if (!message || loading) return
+    if (!message || isThisSessionGenerating) return
 
     setInput('')
     await onSendMessage(message)
-  }, [input, loading, onSendMessage])
+  }, [input, isThisSessionGenerating, onSendMessage])
 
   // Handle keyboard shortcuts
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -96,7 +136,21 @@ export function ChatView({
             {messages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} />
             ))}
-            {loading && <LoadingIndicator />}
+            {/* Show typing animation only if THIS session is generating */}
+            {loading && generatingSessionId === currentSessionId && (
+              <LoadingIndicator activity={activity} />
+            )}
+            {/* Show "elsewhere" link if ANOTHER session is generating */}
+            {generatingSessionId && generatingSessionId !== currentSessionId && (
+              <GeneratingElsewhereIndicator
+                sessionTitle={generatingSessionTitle}
+                onNavigate={onGoToGeneratingSession}
+              />
+            )}
+            {/* Show activity log when generating or has events */}
+            {activity && (activity.status !== 'idle' || activity.events.length > 0) && (
+              <ActivityLog activity={activity} onClear={onClearActivityLog} />
+            )}
             <div ref={messagesEndRef} />
           </>
         )}
@@ -125,13 +179,13 @@ export function ChatView({
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             rows={1}
-            disabled={loading}
+            disabled={isThisSessionGenerating}
             aria-label="Message input"
           />
           <button
             type="submit"
             className="chat-send-button"
-            disabled={!input.trim() || loading}
+            disabled={!input.trim() || isThisSessionGenerating}
             aria-label="Send message"
           >
             <SendIcon />
@@ -150,8 +204,6 @@ export function ChatView({
 // This preserves local state like expandedToolCall
 
 const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
-  const [expandedToolCall, setExpandedToolCall] = useState<number | null>(null)
-
   return (
     <div className={`chat-message chat-message-${message.role}`}>
       <div className="chat-message-avatar">
@@ -176,41 +228,12 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
         {message.toolCalls && message.toolCalls.length > 0 && (
           <div className="chat-tool-calls">
             {message.toolCalls.map((tc, idx) => (
-              <div key={idx} className="chat-tool-call">
-                <button
-                  className="chat-tool-call-header"
-                  onClick={() => setExpandedToolCall(expandedToolCall === idx ? null : idx)}
-                  aria-expanded={expandedToolCall === idx}
-                >
-                  <span className="chat-tool-call-icon">⚡</span>
-                  <span className="chat-tool-call-name">{tc.name}</span>
-                  <span className="chat-tool-call-chevron">
-                    {expandedToolCall === idx ? '−' : '+'}
-                  </span>
-                </button>
-
-                {expandedToolCall === idx && (
-                  <div className="chat-tool-call-body">
-                    <div className="chat-tool-call-section">
-                      <span className="chat-tool-call-label">Arguments</span>
-                      <pre className="chat-tool-call-code">
-                        {JSON.stringify(tc.arguments, null, 2)}
-                      </pre>
-                    </div>
-
-                    {message.toolResults?.[idx] && (
-                      <div className="chat-tool-call-section">
-                        <span className="chat-tool-call-label">Result</span>
-                        <pre className="chat-tool-call-code">
-                          {typeof message.toolResults[idx].result === 'string'
-                            ? message.toolResults[idx].result
-                            : JSON.stringify(message.toolResults[idx].result, null, 2)}
-                        </pre>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+              <ToolCallResult
+                key={idx}
+                toolName={tc.name}
+                args={tc.arguments}
+                result={message.toolResults?.[idx]?.result}
+              />
             ))}
           </div>
         )}
@@ -241,7 +264,21 @@ function EmptyState({ profileName }: { profileName: string }) {
 
 // --- Loading Indicator ---
 
-function LoadingIndicator() {
+function LoadingIndicator({ activity }: { activity?: GenerationActivity }) {
+  const getStatusText = () => {
+    if (!activity) return 'Thinking...'
+
+    if (activity.status === 'tool' && activity.currentTool) {
+      return `Running ${activity.currentTool}...`
+    }
+
+    if (activity.currentRound > 0 && activity.maxRounds > 0) {
+      return `Thinking (${activity.currentRound}/${activity.maxRounds})...`
+    }
+
+    return 'Thinking...'
+  }
+
   return (
     <div className="chat-message chat-message-assistant">
       <div className="chat-message-avatar">Q</div>
@@ -250,7 +287,39 @@ function LoadingIndicator() {
           <span className="chat-loading-dot" />
           <span className="chat-loading-dot" />
           <span className="chat-loading-dot" />
+          <span className="chat-loading-status">{getStatusText()}</span>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// --- Generating Elsewhere Indicator ---
+
+function GeneratingElsewhereIndicator({
+  sessionTitle,
+  onNavigate,
+}: {
+  sessionTitle?: string | null
+  onNavigate?: () => void
+}) {
+  return (
+    <div className="chat-generating-elsewhere">
+      <div className="chat-generating-elsewhere-content">
+        <span className="chat-generating-elsewhere-icon">⏳</span>
+        <span className="chat-generating-elsewhere-text">
+          QweN is generating in{' '}
+          {onNavigate ? (
+            <button
+              onClick={onNavigate}
+              className="chat-generating-elsewhere-link"
+            >
+              {sessionTitle ?? 'another session'}
+            </button>
+          ) : (
+            <span>{sessionTitle ?? 'another session'}</span>
+          )}
+        </span>
       </div>
     </div>
   )

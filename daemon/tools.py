@@ -136,21 +136,27 @@ def _create_mirror_tools_loader() -> ToolLoader:
         # We do this lazily to avoid loading data until needed
         try:
             from mirror_agent import (
+                get_current_datetime,
+                run_python,
                 search_linear_issues,
                 get_linear_issue,
                 list_linear_events,
                 search_slack_messages,
                 get_slack_thread,
+                list_recent_slack_activity,
                 lookup_user,
             )
 
             _cache.update(
                 {
+                    "get_current_datetime": get_current_datetime,
+                    "run_python": run_python,
                     "search_linear_issues": search_linear_issues,
                     "get_linear_issue": get_linear_issue,
                     "list_linear_events": list_linear_events,
                     "search_slack_messages": search_slack_messages,
                     "get_slack_thread": get_slack_thread,
+                    "list_recent_slack_activity": list_recent_slack_activity,
                     "lookup_user": lookup_user,
                 }
             )
@@ -165,11 +171,14 @@ def _create_mirror_tools_loader() -> ToolLoader:
                 return stub
 
             for name in [
+                "get_current_datetime",
+                "run_python",
                 "search_linear_issues",
                 "get_linear_issue",
                 "list_linear_events",
                 "search_slack_messages",
                 "get_slack_thread",
+                "list_recent_slack_activity",
                 "lookup_user",
             ]:
                 _cache[name] = make_stub(err_msg)
@@ -234,11 +243,14 @@ def _populate_registry(registry: ToolRegistry) -> None:
 
     # Register mirror tools with lazy loading
     for name in [
+        "get_current_datetime",
+        "run_python",
         "search_linear_issues",
         "get_linear_issue",
         "list_linear_events",
         "search_slack_messages",
         "get_slack_thread",
+        "list_recent_slack_activity",
         "lookup_user",
     ]:
         registry.register_lazy(name, lambda n=name, loader=mirror_loader: loader()[n])

@@ -7,7 +7,8 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, startTransition } from 'react'
 import { useLocalStorage } from './useLocalStorage'
-import type { ProfileInfo, ToolInfo, Session, SessionSummary, SessionMessage } from '../api'
+import { usePendingSessionStore } from './usePendingSessionStore'
+import type { ProfileInfo, ToolInfo, Session, SessionSummary, SessionMessage, GenerationEvent } from '../api'
 import {
   getHealth,
   getProfiles,
@@ -15,7 +16,7 @@ import {
   listSessions,
   createSession as apiCreateSession,
   getSession as apiGetSession,
-  sendSessionChat,
+  streamSessionChat,
   getGenerationStatus,
   ApiError,
   NetworkError,
@@ -23,6 +24,23 @@ import {
 import type { ChatMessage, Command } from '../components'
 
 // --- Types ---
+
+export interface ActivityEvent {
+  type: 'round_start' | 'generating' | 'tool_start' | 'tool_end' | 'complete' | 'error'
+  round?: number
+  maxRounds?: number
+  toolName?: string
+  toolArgs?: Record<string, unknown>
+  timestamp: number
+}
+
+export interface GenerationActivity {
+  status: 'idle' | 'thinking' | 'tool'
+  currentRound: number
+  maxRounds: number
+  currentTool: string | null
+  events: ActivityEvent[]
+}
 
 export interface AppState {
   // Connection
@@ -39,6 +57,9 @@ export interface AppState {
   currentSession: Session | null
   chatLoading: boolean
   chatError: string | null
+
+  // Generation activity (real-time SSE updates)
+  activity: GenerationActivity
 
   // Command Palette
   paletteOpen: boolean
@@ -77,8 +98,20 @@ export function useAppState() {
   const [chatError, setChatError] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
 
+  // Generation activity state (real-time SSE updates)
+  const [activity, setActivity] = useState<GenerationActivity>({
+    status: 'idle',
+    currentRound: 0,
+    maxRounds: 0,
+    currentTool: null,
+    events: [],
+  })
+
   // Track previous generation state to detect when generation completes
   const prevGenerationInProgress = useRef(false)
+
+  // Pending session store for optimistic updates
+  const pendingStore = usePendingSessionStore()
 
   // --- Debug Logging Helper ---
   const debug = (msg: string, data?: unknown) => {
@@ -245,6 +278,7 @@ export function useAppState() {
   }, [generationInProgress, connectionStatus, refreshSessionsInBackground])
 
   // Load current session from backend when ID changes
+  // BUT: Don't overwrite if we have pending optimistic state (prevents race condition)
   useEffect(() => {
     if (connectionStatus !== 'online' || !currentSessionId) {
       setCurrentSession(null)
@@ -254,9 +288,25 @@ export function useAppState() {
     // Capture current session ID for the async function
     const sessionIdToLoad = currentSessionId
 
+    // Check if this session has pending optimistic updates
+    // If so, use cached state instead of fetching from server
+    const pendingSession = pendingStore.getForHydration(sessionIdToLoad)
+    if (pendingSession) {
+      debug(`Session ${sessionIdToLoad.slice(0, 8)} has pending state, using cached (${pendingSession.messages.length} messages)`)
+      setCurrentSession(pendingSession)
+      return
+    }
+
     async function loadSession() {
       try {
         const session = await apiGetSession(sessionIdToLoad)
+        // Double-check: don't overwrite if pending state appeared while we were fetching
+        const pendingNow = pendingStore.getForHydration(sessionIdToLoad)
+        if (pendingNow) {
+          debug(`Pending state appeared during fetch for ${sessionIdToLoad.slice(0, 8)}, using cached`)
+          setCurrentSession(pendingNow)
+          return
+        }
         setCurrentSession(session)
       } catch (error) {
         console.error('Failed to load session:', error)
@@ -267,7 +317,7 @@ export function useAppState() {
     }
 
     void loadSession()
-  }, [connectionStatus, currentSessionId, setCurrentSessionId])
+  }, [connectionStatus, currentSessionId, setCurrentSessionId, pendingStore])
 
   // Create initial session if none exists
   useEffect(() => {
@@ -348,7 +398,10 @@ export function useAppState() {
       debug('Generation already in progress, request will be queued')
     }
 
-    debug(`📤 Sending message to session ${currentSession.id.slice(0, 8)}: "${content.slice(0, 50)}..."`)
+    // Capture session ID for cleanup in finally block
+    const sendingSessionId = currentSession.id
+
+    debug(`📤 Sending message to session ${sendingSessionId.slice(0, 8)}: "${content.slice(0, 50)}..."`)
 
     // Optimistic update: add user message immediately
     const tempUserMessage: SessionMessage = {
@@ -361,33 +414,137 @@ export function useAppState() {
     }
 
     debug('Optimistic update: adding temp user message')
-    setCurrentSession(prev => prev ? {
-      ...prev,
-      messages: [...prev.messages, tempUserMessage],
-    } : null)
+    const updatedSession = {
+      ...currentSession,
+      messages: [...currentSession.messages, tempUserMessage],
+    }
+    setCurrentSession(updatedSession)
+
+    // Store in pending session store so it's not lost if user switches away
+    pendingStore.recordOptimisticMessage(sendingSessionId, updatedSession, tempUserMessage.id)
 
     setChatLoading(true)
     setGenerationInProgress(true)
     setChatError(null)
 
+    // Reset activity state for new generation
+    setActivity({
+      status: 'thinking',
+      currentRound: 0,
+      maxRounds: 0,
+      currentTool: null,
+      events: [],
+    })
+
     const startTime = Date.now()
     try {
-      debug('Calling sendSessionChat API...')
-      // Send message via session chat endpoint (uses backend semaphore)
-      const result = await sendSessionChat(currentSession.id, {
-        message: content,
-        model_size: 'large',
-      })
+      debug('Starting SSE stream for generation...')
 
-      const elapsed = Date.now() - startTime
-      debug(`📥 Response received in ${elapsed}ms:`, {
-        sessionMessages: result.session.messages.length,
-        queueStats: result.queue_stats,
-        toolCalls: result.response.tool_calls?.length ?? 0,
-      })
+      // Handle SSE events
+      const handleEvent = (event: GenerationEvent) => {
+        debug(`📡 SSE event: ${event.type}`, event)
 
-      // Update current session with authoritative response from server
-      setCurrentSession(result.session)
+        // Create activity event from SSE event
+        // Use event.timestamp if valid (convert from seconds to ms), otherwise use current time
+        const eventTimestamp = typeof event.timestamp === 'number' && !isNaN(event.timestamp)
+          ? event.timestamp * 1000
+          : Date.now()
+
+        const activityEvent: ActivityEvent = {
+          type: event.type,
+          round: event.round,
+          maxRounds: event.max_rounds,
+          toolName: event.tool_name,
+          toolArgs: event.tool_args,
+          timestamp: eventTimestamp,
+        }
+
+        switch (event.type) {
+          case 'round_start':
+          case 'generating':
+            setActivity(prev => ({
+              ...prev,
+              status: 'thinking',
+              currentRound: event.round ?? prev.currentRound,
+              maxRounds: event.max_rounds ?? prev.maxRounds,
+              currentTool: null,
+              events: [...prev.events, activityEvent],
+            }))
+            break
+
+          case 'tool_start':
+            setActivity(prev => ({
+              ...prev,
+              status: 'tool',
+              currentTool: event.tool_name ?? null,
+              events: [...prev.events, activityEvent],
+            }))
+            break
+
+          case 'tool_end':
+            setActivity(prev => ({
+              ...prev,
+              status: 'thinking', // Back to thinking after tool completes
+              currentTool: null,
+              events: [...prev.events, activityEvent],
+            }))
+            break
+
+          case 'complete':
+            if (event.session) {
+              const elapsed = Date.now() - startTime
+              debug(`📥 Response received in ${elapsed}ms via SSE`)
+              // Update pending store with final session state
+              pendingStore.applyComplete(event.session.id, event.session)
+              // Only update currentSession if user is still viewing this session
+              // This prevents overwriting a different session if user switched away
+              setCurrentSession(prev => {
+                if (prev?.id === event.session!.id) {
+                  return event.session!
+                }
+                debug(`User switched away (viewing ${prev?.id?.slice(0, 8)}), not updating session`)
+                return prev
+              })
+            }
+            setActivity(prev => ({
+              ...prev,
+              status: 'idle',
+              currentTool: null,
+              events: [...prev.events, activityEvent],
+            }))
+            break
+
+          case 'error':
+            debug(`❌ SSE error event: ${event.error}`)
+            setChatError(event.error ?? 'Unknown error')
+            setActivity(prev => ({
+              ...prev,
+              status: 'idle',
+              currentTool: null,
+              events: [...prev.events, activityEvent],
+            }))
+            // Revert optimistic update on error - update pending store
+            pendingStore.applyError(sendingSessionId, tempUserMessage.id)
+            // Also update currentSession if still viewing this session
+            setCurrentSession(prev => {
+              if (prev?.id !== sendingSessionId) {
+                return prev // User switched away, don't modify
+              }
+              return {
+                ...prev,
+                messages: prev.messages.filter(m => m.id !== tempUserMessage.id),
+              }
+            })
+            break
+        }
+      }
+
+      // Stream the chat with SSE
+      await streamSessionChat(
+        currentSession.id,
+        { message: content, model_size: 'large' },
+        handleEvent
+      )
 
       // Refresh sessions list in background (title may have changed)
       debug('Refreshing sessions list in background after response...')
@@ -411,12 +568,19 @@ export function useAppState() {
         ...prev,
         messages: prev.messages.filter(m => m.id !== tempUserMessage.id),
       } : null)
+      // Reset activity on error
+      setActivity(prev => ({ ...prev, status: 'idle', currentTool: null }))
     } finally {
-      debug('sendMessage complete, resetting loading states')
+      debug(`sendMessage complete for session ${sendingSessionId.slice(0, 8)}, cleaning up`)
       setChatLoading(false)
       setGenerationInProgress(false)
+      // Mark session as no longer generating, but keep cache for hydration
+      // Cache will be cleared when user switches to another session or on next successful fetch
+      pendingStore.markComplete(sendingSessionId)
+      // Clear generatingSessionId if it was this session
+      setGeneratingSessionId(prev => prev === sendingSessionId ? null : prev)
     }
-  }, [currentSession, chatLoading, connectionStatus])
+  }, [currentSession, chatLoading, connectionStatus, refreshSessionsInBackground, pendingStore])
 
   const newSession = useCallback(async () => {
     if (connectionStatus !== 'online') return
@@ -438,11 +602,27 @@ export function useAppState() {
 
     debug(`Switching to session: ${sessionId.slice(0, 8)}`)
     setChatError(null)
+
+    // Check if this session has pending optimistic updates (generating or queued)
+    // If so, use cached state to preserve the user message that isn't on server yet
+    const cachedSession = pendingStore.getForHydration(sessionId)
+    if (cachedSession) {
+      debug(`Restoring cached state for pending session (${cachedSession.messages.length} messages)`)
+      setCurrentSessionId(sessionId)
+      setCurrentSession(cachedSession)
+      if (cachedSession.profile_name !== selectedProfile) {
+        setSelectedProfile(cachedSession.profile_name)
+      }
+      return
+    }
+
     try {
       const session = await apiGetSession(sessionId)
       debug(`Loaded session: ${session.messages.length} messages, profile=${session.profile_name}`)
       setCurrentSessionId(session.id)
       setCurrentSession(session)
+      // Clear any stale pending cache for this session since we have fresh server data
+      pendingStore.clear(sessionId)
       // Update selected profile to match session
       if (session.profile_name !== selectedProfile) {
         debug(`Updating profile: ${selectedProfile} -> ${session.profile_name}`)
@@ -451,7 +631,7 @@ export function useAppState() {
     } catch (error) {
       console.error('Failed to switch session:', error)
     }
-  }, [connectionStatus, selectedProfile, setCurrentSessionId, setSelectedProfile])
+  }, [connectionStatus, selectedProfile, setCurrentSessionId, setSelectedProfile, pendingStore])
 
   const clearError = useCallback(() => {
     setChatError(null)
@@ -558,6 +738,11 @@ export function useAppState() {
     }
   }, [currentSession, chatMessages])
 
+  // Helper to clear activity log
+  const clearActivityLog = useCallback(() => {
+    setActivity(prev => ({ ...prev, events: [] }))
+  }, [])
+
   // --- Return State & Actions ---
 
   return {
@@ -573,6 +758,7 @@ export function useAppState() {
     currentSession: currentSessionWithMessages,
     chatLoading,
     chatError,
+    activity,
     paletteOpen,
     recentCommands,
     profilesLoading,
@@ -584,6 +770,7 @@ export function useAppState() {
     selectProfile,
     sendMessage,
     clearError,
+    clearActivityLog,
     openPalette,
     closePalette,
     newSession,

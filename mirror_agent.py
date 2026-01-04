@@ -35,9 +35,11 @@ SLACK_MIRROR_DIR = Path(os.environ.get("VIBEOS_SLACK_MIRROR_DIR", DEFAULT_SLACK_
 
 # --- Data Types ---
 
+
 @dataclass
 class LinearIssue:
     """Linear issue snapshot."""
+
     id: str
     identifier: str
     title: str
@@ -74,6 +76,7 @@ class LinearIssue:
 @dataclass
 class LinearEvent:
     """Linear issue event."""
+
     id: str
     issue_id: str
     issue_identifier: str
@@ -100,6 +103,7 @@ class LinearEvent:
 @dataclass
 class LinearComment:
     """Linear comment record."""
+
     id: str
     issue_id: str
     issue_identifier: str | None
@@ -122,6 +126,7 @@ class LinearComment:
 @dataclass
 class SlackMessage:
     """Slack message."""
+
     ts: str
     user: str | None
     text: str | None
@@ -141,14 +146,15 @@ class SlackMessage:
 
 # --- Data Access Layer ---
 
+
 class MirrorDataStore:
     """
     Lazy-loading data store for Linear and Slack mirrors.
-    
+
     Caches loaded data in memory for the session duration.
     Uses streaming for large files to avoid memory issues.
     """
-    
+
     def __init__(
         self,
         linear_dir: Path = LINEAR_MIRROR_DIR,
@@ -156,7 +162,7 @@ class MirrorDataStore:
     ):
         self.linear_dir = linear_dir
         self.slack_dir = slack_dir
-        
+
         # Caches
         self._linear_issues: list[LinearIssue] | None = None
         self._linear_comments: dict[str, list[LinearComment]] | None = None
@@ -164,9 +170,9 @@ class MirrorDataStore:
         self._linear_users: dict[str, dict] | None = None
         self._slack_profiles: dict[str, dict] | None = None
         self._slack_channel_names: dict[str, str] | None = None
-    
+
     # --- JSONL Utilities ---
-    
+
     @staticmethod
     def _read_jsonl(path: Path) -> Iterator[dict]:
         """Stream JSONL file line by line."""
@@ -180,14 +186,14 @@ class MirrorDataStore:
                         yield json.loads(line)
                     except json.JSONDecodeError:
                         continue
-    
+
     @staticmethod
     def _read_jsonl_list(path: Path) -> list[dict]:
         """Read entire JSONL file into list."""
         return list(MirrorDataStore._read_jsonl(path))
-    
+
     # --- Linear Data Access ---
-    
+
     def get_linear_issues(self) -> list[LinearIssue]:
         """Load all Linear issues (cached)."""
         if self._linear_issues is None:
@@ -196,7 +202,7 @@ class MirrorDataStore:
                 LinearIssue.from_dict(d) for d in self._read_jsonl(path)
             ]
         return self._linear_issues
-    
+
     def get_linear_comments(self) -> dict[str, list[LinearComment]]:
         """Load Linear comments grouped by issue_id (cached)."""
         if self._linear_comments is None:
@@ -208,7 +214,7 @@ class MirrorDataStore:
                     self._linear_comments[comment.issue_id] = []
                 self._linear_comments[comment.issue_id].append(comment)
         return self._linear_comments
-    
+
     def get_linear_events(self) -> list[LinearEvent]:
         """Load all Linear events from rotated log files (cached)."""
         if self._linear_events is None:
@@ -220,7 +226,7 @@ class MirrorDataStore:
             # Sort by created_at descending (most recent first)
             self._linear_events.sort(key=lambda e: e.created_at, reverse=True)
         return self._linear_events
-    
+
     def get_linear_users(self) -> dict[str, dict]:
         """Load Linear user profiles (cached)."""
         if self._linear_users is None:
@@ -236,9 +242,9 @@ class MirrorDataStore:
                         user_id = user.get("id", path.stem)
                         self._linear_users[user_id] = user
         return self._linear_users
-    
+
     # --- Slack Data Access ---
-    
+
     def get_slack_profiles(self) -> dict[str, dict]:
         """Load Slack user profiles (cached)."""
         if self._slack_profiles is None:
@@ -253,7 +259,7 @@ class MirrorDataStore:
                         user_id = user.get("id", path.stem)
                         self._slack_profiles[user_id] = user
         return self._slack_profiles
-    
+
     def get_slack_channel_names(self) -> dict[str, str]:
         """Build channel ID to name mapping from conversation files."""
         if self._slack_channel_names is None:
@@ -265,7 +271,7 @@ class MirrorDataStore:
                     # Try to find channel name from first message or use ID
                     self._slack_channel_names[channel_id] = channel_id
         return self._slack_channel_names
-    
+
     def stream_slack_conversations(self) -> Iterator[tuple[str, SlackMessage]]:
         """Stream all Slack conversation messages with channel ID."""
         convos_dir = self.slack_dir / "conversations"
@@ -275,7 +281,7 @@ class MirrorDataStore:
             channel_id = path.stem
             for d in self._read_jsonl(path):
                 yield channel_id, SlackMessage.from_dict(d)
-    
+
     def stream_slack_threads(self) -> Iterator[tuple[str, str, SlackMessage]]:
         """Stream all Slack thread messages with channel ID and thread_ts."""
         threads_dir = self.slack_dir / "threads"
@@ -290,7 +296,7 @@ class MirrorDataStore:
                 thread_ts = thread_ts.replace("_", ".")
                 for d in self._read_jsonl(path):
                     yield channel_id, thread_ts, SlackMessage.from_dict(d)
-    
+
     def get_slack_thread(self, channel_id: str, thread_ts: str) -> list[SlackMessage]:
         """Load a specific Slack thread."""
         sanitized_ts = thread_ts.replace(".", "_")
@@ -298,9 +304,9 @@ class MirrorDataStore:
         if not path.exists():
             return []
         return [SlackMessage.from_dict(d) for d in self._read_jsonl(path)]
-    
+
     # --- User Resolution ---
-    
+
     def resolve_slack_user(self, user_id: str) -> str:
         """Resolve Slack user ID to display name."""
         if not user_id:
@@ -318,7 +324,7 @@ class MirrorDataStore:
             )
             return name
         return user_id
-    
+
     def resolve_linear_user(self, user_id: str) -> str:
         """Resolve Linear user ID to display name."""
         if not user_id:
@@ -345,6 +351,7 @@ def get_data_store() -> MirrorDataStore:
 
 # --- Tool Implementations ---
 
+
 def search_linear_issues(
     query: str = "",
     state: str | None = None,
@@ -355,16 +362,16 @@ def search_linear_issues(
 ) -> str:
     """
     Search Linear issues with optional filters.
-    
+
     Returns a paginated list of matching issues with summary info.
     """
     store = get_data_store()
     issues = store.get_linear_issues()
-    
+
     # Apply filters
     filtered = []
     query_lower = query.lower() if query else ""
-    
+
     for issue in issues:
         # Text search on title and description
         if query_lower:
@@ -372,107 +379,113 @@ def search_linear_issues(
             desc_match = issue.description and query_lower in issue.description.lower()
             if not (title_match or desc_match):
                 continue
-        
+
         # State filter
         if state and issue.state_name:
             if state.lower() not in issue.state_name.lower():
                 continue
-        
+
         # Assignee filter
         if assignee and issue.assignee_name:
             if assignee.lower() not in issue.assignee_name.lower():
                 continue
         elif assignee and not issue.assignee_name:
             continue
-        
+
         # Label filter
         if label:
             label_match = any(label.lower() in l.lower() for l in issue.labels)
             if not label_match:
                 continue
-        
+
         filtered.append(issue)
-    
+
     # Sort by updated_at descending
     filtered.sort(key=lambda i: i.updated_at, reverse=True)
-    
+
     # Paginate
     total = len(filtered)
     start = page * limit
     end = start + limit
     page_items = filtered[start:end]
-    
+
     # Format results
     results = []
     for issue in page_items:
-        results.append({
-            "identifier": issue.identifier,
-            "title": issue.title,
-            "state": issue.state_name,
-            "assignee": issue.assignee_name,
-            "team": issue.team_name,
-            "labels": issue.labels[:3],  # Limit labels shown
-            "updated_at": issue.updated_at[:10],  # Just date
-        })
-    
-    return json.dumps({
-        "total": total,
-        "page": page,
-        "page_size": limit,
-        "has_more": end < total,
-        "issues": results,
-    })
+        results.append(
+            {
+                "identifier": issue.identifier,
+                "title": issue.title,
+                "state": issue.state_name,
+                "assignee": issue.assignee_name,
+                "team": issue.team_name,
+                "labels": issue.labels[:3],  # Limit labels shown
+                "updated_at": issue.updated_at[:10],  # Just date
+            }
+        )
+
+    return json.dumps(
+        {
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "has_more": end < total,
+            "issues": results,
+        }
+    )
 
 
 def get_linear_issue(identifier: str) -> str:
     """
     Get full details for a Linear issue by identifier (e.g., FE-42).
-    
+
     Returns the issue with description and recent comments.
     """
     store = get_data_store()
     issues = store.get_linear_issues()
-    
+
     # Find issue by identifier
     issue = next((i for i in issues if i.identifier == identifier), None)
     if not issue:
         return json.dumps({"error": f"Issue {identifier} not found"})
-    
+
     # Get comments for this issue
     comments_by_issue = store.get_linear_comments()
     issue_comments = comments_by_issue.get(issue.id, [])
-    
+
     # Sort comments by date and take recent ones
     issue_comments.sort(key=lambda c: c.created_at, reverse=True)
     recent_comments = issue_comments[:10]
-    
+
     # Format description (truncate if very long)
     description = issue.description or ""
     if len(description) > 2000:
         description = description[:2000] + "...(truncated)"
-    
-    return json.dumps({
-        "identifier": issue.identifier,
-        "title": issue.title,
-        "url": issue.url,
-        "state": issue.state_name,
-        "state_type": issue.state_type,
-        "assignee": issue.assignee_name,
-        "team": issue.team_name,
-        "labels": issue.labels,
-        "priority": issue.priority,
-        "created_at": issue.created_at,
-        "updated_at": issue.updated_at,
-        "description": description,
-        "comments": [
-            {
-                "author": c.user_name,
-                "body": c.body[:500] if len(c.body) > 500 else c.body,
-                "created_at": c.created_at[:10],
-            }
-            for c in recent_comments
-        ],
-    })
+
+    return json.dumps(
+        {
+            "identifier": issue.identifier,
+            "title": issue.title,
+            "url": issue.url,
+            "state": issue.state_name,
+            "state_type": issue.state_type,
+            "assignee": issue.assignee_name,
+            "team": issue.team_name,
+            "labels": issue.labels,
+            "priority": issue.priority,
+            "created_at": issue.created_at,
+            "updated_at": issue.updated_at,
+            "description": description,
+            "comments": [
+                {
+                    "author": c.user_name,
+                    "body": c.body[:500] if len(c.body) > 500 else c.body,
+                    "created_at": c.created_at[:10],
+                }
+                for c in recent_comments
+            ],
+        }
+    )
 
 
 def list_linear_events(
@@ -484,42 +497,42 @@ def list_linear_events(
 ) -> str:
     """
     List recent Linear events (state changes, assignments, etc.).
-    
+
     Returns paginated list of events within the time window.
     """
     store = get_data_store()
     events = store.get_linear_events()
-    
+
     # Calculate cutoff date
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     cutoff_str = cutoff.isoformat()
-    
+
     # Filter events
     filtered = []
     for event in events:
         # Time filter
         if event.created_at < cutoff_str:
             continue
-        
+
         # Event type filter
         if event_type and event_type.lower() not in event.event_kind.lower():
             continue
-        
+
         # Actor filter
         if actor and event.actor_name:
             if actor.lower() not in event.actor_name.lower():
                 continue
         elif actor and not event.actor_name:
             continue
-        
+
         filtered.append(event)
-    
+
     # Already sorted by created_at descending
     total = len(filtered)
     start = page * limit
     end = start + limit
     page_items = filtered[start:end]
-    
+
     # Format results
     results = []
     for event in page_items:
@@ -530,17 +543,21 @@ def list_linear_events(
             "timestamp": event.created_at[:16].replace("T", " "),
         }
         if event.from_state or event.to_state:
-            result["transition"] = f"{event.from_state or '?'} → {event.to_state or '?'}"
+            result["transition"] = (
+                f"{event.from_state or '?'} → {event.to_state or '?'}"
+            )
         results.append(result)
-    
-    return json.dumps({
-        "total": total,
-        "page": page,
-        "page_size": limit,
-        "has_more": end < total,
-        "since_days": since_days,
-        "events": results,
-    })
+
+    return json.dumps(
+        {
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "has_more": end < total,
+            "since_days": since_days,
+            "events": results,
+        }
+    )
 
 
 def search_slack_messages(
@@ -551,30 +568,32 @@ def search_slack_messages(
 ) -> str:
     """
     Search Slack messages across conversations and threads.
-    
+
     Returns matching messages with context for drilling down into threads.
     """
     store = get_data_store()
     query_lower = query.lower()
-    
+
     matches = []
-    
+
     # Search conversations
     for channel_id, msg in store.stream_slack_conversations():
         if channel and channel.lower() not in channel_id.lower():
             continue
-        
+
         if msg.text and query_lower in msg.text.lower():
-            matches.append({
-                "source": "conversation",
-                "channel_id": channel_id,
-                "thread_ts": msg.thread_ts,
-                "ts": msg.ts,
-                "user": store.resolve_slack_user(msg.user),
-                "text": msg.text[:200] if len(msg.text) > 200 else msg.text,
-                "reply_count": msg.reply_count,
-            })
-    
+            matches.append(
+                {
+                    "source": "conversation",
+                    "channel_id": channel_id,
+                    "thread_ts": msg.thread_ts,
+                    "ts": msg.ts,
+                    "user": store.resolve_slack_user(msg.user),
+                    "text": msg.text[:200] if len(msg.text) > 200 else msg.text,
+                    "reply_count": msg.reply_count,
+                }
+            )
+
     # Search threads (limit to avoid memory issues)
     thread_count = 0
     max_threads = 1000  # Safety limit
@@ -582,81 +601,197 @@ def search_slack_messages(
         if thread_count > max_threads:
             break
         thread_count += 1
-        
+
         if channel and channel.lower() not in channel_id.lower():
             continue
-        
+
         if msg.text and query_lower in msg.text.lower():
-            matches.append({
-                "source": "thread",
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
-                "ts": msg.ts,
-                "user": store.resolve_slack_user(msg.user),
-                "text": msg.text[:200] if len(msg.text) > 200 else msg.text,
-            })
-    
+            matches.append(
+                {
+                    "source": "thread",
+                    "channel_id": channel_id,
+                    "thread_ts": thread_ts,
+                    "ts": msg.ts,
+                    "user": store.resolve_slack_user(msg.user),
+                    "text": msg.text[:200] if len(msg.text) > 200 else msg.text,
+                }
+            )
+
     # Sort by timestamp descending
     matches.sort(key=lambda m: m["ts"], reverse=True)
-    
+
     # Paginate
     total = len(matches)
     start = page * limit
     end = start + limit
     page_items = matches[start:end]
-    
-    return json.dumps({
-        "total": total,
-        "page": page,
-        "page_size": limit,
-        "has_more": end < total,
-        "messages": page_items,
-    })
+
+    return json.dumps(
+        {
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "has_more": end < total,
+            "messages": page_items,
+        }
+    )
 
 
 def get_slack_thread(channel_id: str, thread_ts: str) -> str:
     """
     Get all messages in a Slack thread.
-    
+
     Returns the full thread with resolved user names.
     """
     store = get_data_store()
     messages = store.get_slack_thread(channel_id, thread_ts)
-    
+
     if not messages:
-        return json.dumps({
-            "error": f"Thread not found: {channel_id}/{thread_ts}",
-            "hint": "The thread_ts should use dots (e.g., 1700000000.123456)",
-        })
-    
+        return json.dumps(
+            {
+                "error": f"Thread not found: {channel_id}/{thread_ts}",
+                "hint": "The thread_ts should use dots (e.g., 1700000000.123456)",
+            }
+        )
+
     # Sort by timestamp
     messages.sort(key=lambda m: m.ts)
-    
+
     # Format messages
     formatted = []
     for msg in messages:
         text = msg.text or ""
         if len(text) > 1000:
             text = text[:1000] + "...(truncated)"
-        
-        formatted.append({
-            "ts": msg.ts,
-            "user": store.resolve_slack_user(msg.user),
-            "text": text,
-        })
+
+        formatted.append(
+            {
+                "ts": msg.ts,
+                "user": store.resolve_slack_user(msg.user),
+                "text": text,
+            }
+        )
+
+    return json.dumps(
+        {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "message_count": len(formatted),
+            "messages": formatted,
+        }
+    )
+
+
+def list_recent_slack_activity(
+    since_days: int = 7,
+    channel: str | None = None,
+    limit: int = 15,
+    page: int = 0,
+) -> str:
+    """
+    List recent Slack messages to see what people are talking about.
+
+    No search query needed - returns the most recent messages across channels.
+    Great for getting a pulse on team discussions.
     
-    return json.dumps({
-        "channel_id": channel_id,
-        "thread_ts": thread_ts,
-        "message_count": len(formatted),
-        "messages": formatted,
-    })
+    Use pagination (page parameter) to browse through more messages if needed.
+    Start with page 0, then request page 1, 2, etc. to see older messages.
+    """
+    store = get_data_store()
+
+    # Calculate cutoff timestamp
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    cutoff_ts = str(cutoff.timestamp())
+
+    messages = []
+
+    # Collect recent messages from conversations
+    for channel_id, msg in store.stream_slack_conversations():
+        if channel and channel.lower() not in channel_id.lower():
+            continue
+
+        # Filter by timestamp
+        if msg.ts < cutoff_ts:
+            continue
+
+        # Skip empty messages
+        if not msg.text or not msg.text.strip():
+            continue
+
+        messages.append(
+            {
+                "source": "conversation",
+                "channel_id": channel_id,
+                "thread_ts": msg.thread_ts,
+                "ts": msg.ts,
+                "user": store.resolve_slack_user(msg.user),
+                "text": msg.text[:300] if len(msg.text) > 300 else msg.text,
+                "reply_count": msg.reply_count,
+            }
+        )
+
+    # Also collect recent thread messages
+    thread_count = 0
+    max_threads = 500
+    for channel_id, thread_ts, msg in store.stream_slack_threads():
+        if thread_count > max_threads:
+            break
+        thread_count += 1
+
+        if channel and channel.lower() not in channel_id.lower():
+            continue
+
+        if msg.ts < cutoff_ts:
+            continue
+
+        if not msg.text or not msg.text.strip():
+            continue
+
+        messages.append(
+            {
+                "source": "thread",
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "ts": msg.ts,
+                "user": store.resolve_slack_user(msg.user),
+                "text": msg.text[:300] if len(msg.text) > 300 else msg.text,
+            }
+        )
+
+    # Sort by timestamp descending (most recent first)
+    messages.sort(key=lambda m: m["ts"], reverse=True)
+
+    # Paginate
+    total = len(messages)
+    start = page * limit
+    end = start + limit
+    page_items = messages[start:end]
+
+    # Convert timestamps to readable dates for context
+    for msg in page_items:
+        try:
+            ts_float = float(msg["ts"])
+            dt = datetime.fromtimestamp(ts_float, tz=timezone.utc)
+            msg["date"] = dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            msg["date"] = "unknown"
+
+    return json.dumps(
+        {
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "has_more": end < total,
+            "since_days": since_days,
+            "messages": page_items,
+        }
+    )
 
 
 def lookup_user(user_id_or_name: str, source: str = "both") -> str:
     """
     Look up a user by ID or name in Linear and/or Slack profiles.
-    
+
     Args:
         user_id_or_name: The user ID or name to search for
         source: Where to search - "linear", "slack", or "both"
@@ -664,62 +799,215 @@ def lookup_user(user_id_or_name: str, source: str = "both") -> str:
     store = get_data_store()
     results = []
     search = user_id_or_name.lower()
-    
+
     # Search Linear users
     if source in ("both", "linear"):
         for user_id, user in store.get_linear_users().items():
             name = user.get("displayName") or user.get("name") or ""
             email = user.get("email") or ""
-            
-            if (search in user_id.lower() or 
-                search in name.lower() or 
-                search in email.lower()):
-                results.append({
-                    "source": "linear",
-                    "id": user_id,
-                    "name": name,
-                    "email": email,
-                    "active": user.get("active", True),
-                })
-    
+
+            if (
+                search in user_id.lower()
+                or search in name.lower()
+                or search in email.lower()
+            ):
+                results.append(
+                    {
+                        "source": "linear",
+                        "id": user_id,
+                        "name": name,
+                        "email": email,
+                        "active": user.get("active", True),
+                    }
+                )
+
     # Search Slack users
     if source in ("both", "slack"):
         for user_id, user in store.get_slack_profiles().items():
             profile = user.get("profile", {})
             name = (
-                profile.get("display_name") or
-                profile.get("real_name") or
-                user.get("name") or ""
+                profile.get("display_name")
+                or profile.get("real_name")
+                or user.get("name")
+                or ""
             )
             email = profile.get("email") or ""
-            
-            if (search in user_id.lower() or 
-                search in name.lower() or 
-                search in email.lower()):
-                results.append({
-                    "source": "slack",
-                    "id": user_id,
-                    "name": name,
-                    "display_name": profile.get("display_name"),
-                    "real_name": profile.get("real_name"),
-                    "email": email,
-                })
-    
+
+            if (
+                search in user_id.lower()
+                or search in name.lower()
+                or search in email.lower()
+            ):
+                results.append(
+                    {
+                        "source": "slack",
+                        "id": user_id,
+                        "name": name,
+                        "display_name": profile.get("display_name"),
+                        "real_name": profile.get("real_name"),
+                        "email": email,
+                    }
+                )
+
     if not results:
-        return json.dumps({
-            "error": f"No users found matching '{user_id_or_name}'",
-            "searched": source,
-        })
+        return json.dumps(
+            {
+                "error": f"No users found matching '{user_id_or_name}'",
+                "searched": source,
+            }
+        )
+
+    return json.dumps(
+        {
+            "query": user_id_or_name,
+            "results": results[:10],  # Limit results
+        }
+    )
+
+
+def get_current_datetime() -> str:
+    """
+    Get the current date and time.
     
-    return json.dumps({
-        "query": user_id_or_name,
-        "results": results[:10],  # Limit results
-    })
+    Use this to orient yourself in time before answering questions
+    about "last week", "this month", "recently", etc.
+    """
+    now = datetime.now(timezone.utc)
+    local_now = datetime.now()
+    
+    return json.dumps(
+        {
+            "utc": {
+                "iso": now.isoformat(),
+                "date": now.strftime("%Y-%m-%d"),
+                "time": now.strftime("%H:%M:%S"),
+                "day_of_week": now.strftime("%A"),
+                "timestamp": now.timestamp(),
+            },
+            "local": {
+                "iso": local_now.isoformat(),
+                "date": local_now.strftime("%Y-%m-%d"),
+                "time": local_now.strftime("%H:%M:%S"),
+                "day_of_week": local_now.strftime("%A"),
+            },
+            "hints": {
+                "last_7_days": f"{(now - timedelta(days=7)).strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}",
+                "last_30_days": f"{(now - timedelta(days=30)).strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}",
+                "last_90_days": f"{(now - timedelta(days=90)).strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}",
+            },
+        }
+    )
+
+
+def run_python(code: str, timeout: int = 30) -> str:
+    """
+    Execute Python code and return the output.
+    
+    Full Python environment with access to:
+    - pandas, numpy, scipy for data analysis
+    - matplotlib, seaborn, plotly for visualization
+    - All standard library modules
+    
+    Code is executed in the daemon's Python process.
+    Use print() to output results.
+    """
+    import io
+    import sys
+    import traceback
+    import signal
+    
+    # Capture stdout and stderr
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    captured_stdout = io.StringIO()
+    captured_stderr = io.StringIO()
+    
+    result = {
+        "success": False,
+        "stdout": "",
+        "stderr": "",
+        "error": None,
+        "return_value": None,
+    }
+    
+    # Timeout handler
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"Code execution exceeded {timeout} seconds")
+    
+    try:
+        # Set up timeout (Unix only)
+        if hasattr(signal, 'SIGALRM'):
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout)
+        
+        # Redirect stdout/stderr
+        sys.stdout = captured_stdout
+        sys.stderr = captured_stderr
+        
+        # Create execution namespace with useful imports pre-loaded
+        exec_globals = {
+            "__builtins__": __builtins__,
+            "__name__": "__main__",
+        }
+        
+        # Execute the code
+        exec(code, exec_globals)
+        
+        result["success"] = True
+        
+    except TimeoutError as e:
+        result["error"] = str(e)
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {str(e)}"
+        result["stderr"] = traceback.format_exc()
+    finally:
+        # Cancel timeout
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+        
+        # Restore stdout/stderr
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        
+        # Capture output
+        result["stdout"] = captured_stdout.getvalue()
+        result["stderr"] = captured_stderr.getvalue() or result.get("stderr", "")
+    
+    return json.dumps(result)
 
 
 # --- Tool Definitions ---
 
 MIRROR_TOOLS = [
+    Tool(
+        name="get_current_datetime",
+        description="Get the current date and time. ALWAYS call this first when answering questions about time periods like 'last week', 'this month', 'past 2 months', 'recently', etc. Returns UTC and local time with helpful date range hints.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        function=get_current_datetime,
+    ),
+    Tool(
+        name="run_python",
+        description="Execute Python code and return output. Full Python environment with pandas, numpy, scipy, matplotlib, seaborn, plotly available. Use for data analysis, calculations, statistics, or generating visualizations. Use print() to output results.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code to execute. Use print() for output. Can import any installed package.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Max execution time in seconds (default 30)",
+                },
+            },
+            "required": ["code"],
+        },
+        function=run_python,
+    ),
     Tool(
         name="search_linear_issues",
         description="Search Linear issues by keyword. Supports filtering by state (e.g., 'In Progress'), assignee name, and label. Returns paginated summary results - use get_linear_issue for full details.",
@@ -772,13 +1060,13 @@ MIRROR_TOOLS = [
     ),
     Tool(
         name="list_linear_events",
-        description="List recent Linear activity: state changes, assignments, comments, etc. Good for understanding what happened recently.",
+        description="List recent Linear activity: state changes, assignments, comments, etc. Good for understanding what happened recently. Use get_current_datetime first to understand 'today'.",
         parameters={
             "type": "object",
             "properties": {
                 "since_days": {
                     "type": "integer",
-                    "description": "How many days back to look (default 7)",
+                    "description": "How many days back to look (default 7, no limit)",
                 },
                 "event_type": {
                     "type": "string",
@@ -848,6 +1136,33 @@ MIRROR_TOOLS = [
         function=get_slack_thread,
     ),
     Tool(
+        name="list_recent_slack_activity",
+        description="List recent Slack messages without needing a search query. Use this to see what people are talking about, get a pulse on team discussions, or answer 'what's happening on Slack' questions. Use pagination to browse more - start with page 0, then 1, 2, etc. Use get_current_datetime first to understand 'today'.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "since_days": {
+                    "type": "integer",
+                    "description": "How many days back to look (default 7, no limit)",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Optional channel ID to limit to a specific channel",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per page (default 15, keep small to fit context)",
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Page number for pagination (0-indexed). Use to browse more messages.",
+                },
+            },
+            "required": [],
+        },
+        function=list_recent_slack_activity,
+    ),
+    Tool(
         name="lookup_user",
         description="Look up a user by ID or name to get their profile info. Works for both Linear and Slack users.",
         parameters={
@@ -872,26 +1187,59 @@ MIRROR_TOOLS = [
 
 # --- System Prompt ---
 
-SYSTEM_PROMPT = """You are a knowledge assistant with access to your team's Linear issues and Slack conversations.
+SYSTEM_PROMPT = """You are a knowledge assistant with access to your team's Linear issues and Slack conversations, plus Python for data analysis.
 
 ## Your Data Sources
 
 1. **Linear Mirror**: All issues, comments, and activity events from your Linear workspace
 2. **Slack Mirror**: Conversations and threads from your Slack workspace
+3. **Python**: Full data science environment for analysis and visualization
 
 ## How to Answer Questions
 
-1. **Search first**: Use search tools to find relevant issues or messages before answering
-2. **Drill down**: Use get_linear_issue or get_slack_thread for full details when needed
-3. **Synthesize**: Combine information from multiple sources to give complete answers
-4. **Be transparent**: Say when information might be incomplete or outdated (mirrors sync periodically)
+1. **Orient in time first**: Use get_current_datetime when questions involve time ("last week", "this month", "recently")
+2. **Search first**: Use search tools to find relevant issues or messages before answering
+3. **Drill down**: Use get_linear_issue or get_slack_thread for full details when needed
+4. **Analyze with Python**: Use run_python for calculations, statistics, or data transformations
+5. **Synthesize**: Combine information from multiple sources to give complete answers
+6. **Be transparent**: Say when information might be incomplete or outdated (mirrors sync periodically)
 
 ## Tool Strategy
 
+- For time-based questions → get_current_datetime FIRST, then other tools
 - For questions about project status → search_linear_issues + get_linear_issue
 - For "what happened" questions → list_linear_events
 - For conversation/discussion questions → search_slack_messages + get_slack_thread
+- For "what are people talking about" / browsing questions → list_recent_slack_activity
 - For people questions → lookup_user
+- For calculations, statistics, charts → run_python
+
+## Python Capabilities (run_python)
+
+You have a full Python environment with:
+- **pandas**: DataFrames, data manipulation, time series
+- **numpy**: Numerical computing, arrays, linear algebra
+- **scipy**: Scientific computing, statistics, optimization
+- **matplotlib/seaborn**: Static charts and statistical plots
+- **plotly**: Interactive visualizations
+
+Use Python to:
+- Calculate statistics from collected data
+- Transform and analyze JSON results from other tools
+- Create visualizations (save to files if needed)
+- Perform complex date/time calculations
+
+## Pagination Strategy (IMPORTANT)
+
+Results are paginated to fit your context window. When browsing or summarizing:
+
+1. **Start small**: Request page 0 first with a reasonable limit (10-15 items)
+2. **Scan for themes**: Look for recurring topics, active discussions, key people
+3. **Go deeper selectively**: Only fetch more pages if needed for specific topics
+4. **Summarize as you go**: Don't try to load everything - synthesize themes from samples
+5. **Use search to focus**: Once you identify themes, use search_slack_messages to find more on specific topics
+
+For "what's happening" questions: 2-3 pages of recent activity is usually enough to identify major themes.
 
 ## Response Style
 
@@ -905,6 +1253,7 @@ Remember: You're helping someone understand their team's work. Focus on actionab
 
 # --- Agent Factory ---
 
+
 def create_mirror_agent(model_size: str = "large") -> ToolCallingAgent:
     """Create a configured mirror knowledge agent."""
     return ToolCallingAgent(
@@ -917,10 +1266,11 @@ def create_mirror_agent(model_size: str = "large") -> ToolCallingAgent:
 
 # --- CLI Entry Point ---
 
+
 def main():
     """Interactive CLI for the mirror knowledge agent."""
     model_size = sys.argv[1] if len(sys.argv) > 1 else "large"
-    
+
     print("=" * 60)
     print("🔮 Mirror Knowledge Agent")
     print("=" * 60)
@@ -932,32 +1282,32 @@ def main():
     print("Type 'quit' or 'exit' to stop.")
     print("=" * 60)
     print()
-    
+
     # Verify data directories exist
     if not LINEAR_MIRROR_DIR.exists():
         print(f"⚠️  Warning: Linear mirror not found at {LINEAR_MIRROR_DIR}")
     if not SLACK_MIRROR_DIR.exists():
         print(f"⚠️  Warning: Slack mirror not found at {SLACK_MIRROR_DIR}")
-    
+
     agent = create_mirror_agent(model_size)
-    
+
     while True:
         try:
             user_input = input("\n💬 You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n\n👋 Goodbye!")
             break
-        
+
         if not user_input:
             continue
-        
+
         if user_input.lower() in ("quit", "exit", "q"):
             print("\n👋 Goodbye!")
             break
-        
+
         print()
         response = agent.run(user_input, verbose=True)
-        
+
         print("\n" + "=" * 60)
         print("🤖 Assistant:")
         print("-" * 60)

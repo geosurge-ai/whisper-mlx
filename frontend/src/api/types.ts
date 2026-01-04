@@ -135,6 +135,29 @@ export interface GenerationStatus {
   queued_session_ids: string[]
 }
 
+// --- SSE Generation Events ---
+
+export type GenerationEventType =
+  | 'round_start'
+  | 'generating'
+  | 'tool_start'
+  | 'tool_end'
+  | 'complete'
+  | 'error'
+
+export interface GenerationEvent {
+  type: GenerationEventType
+  round?: number
+  max_rounds?: number
+  tool_name?: string
+  tool_args?: Record<string, unknown>
+  session?: Session
+  response?: ChatResponse
+  queue_stats?: QueueStats
+  error?: string
+  timestamp: number
+}
+
 // --- API Error Response ---
 
 export interface ApiErrorResponse {

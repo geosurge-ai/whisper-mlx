@@ -22,6 +22,7 @@ import type {
   SessionChatRequest,
   SessionChatResponse,
   GenerationStatus,
+  GenerationEvent,
 } from './types'
 
 // Base URL - proxied through Vite in dev, direct in prod
@@ -200,6 +201,106 @@ export async function sendSessionChat(
     method: 'POST',
     body: JSON.stringify(request),
   })
+}
+
+/**
+ * Send a message in a session with SSE streaming for real-time progress.
+ *
+ * Events are streamed as they occur:
+ * - round_start: New inference round started
+ * - generating: Model is thinking
+ * - tool_start: Tool execution started
+ * - tool_end: Tool execution finished
+ * - complete: Generation finished (includes full session)
+ * - error: An error occurred
+ *
+ * @param sessionId - Session ID to send message to
+ * @param request - Chat request (message, model_size, etc.)
+ * @param onEvent - Callback for each SSE event
+ * @returns Promise that resolves when stream completes
+ */
+export async function streamSessionChat(
+  sessionId: string,
+  request: SessionChatRequest,
+  onEvent: (event: GenerationEvent) => void
+): Promise<void> {
+  const url = `${API_BASE}/v1/sessions/${encodeURIComponent(sessionId)}/chat/stream`
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  })
+
+  if (!response.ok) {
+    let detail: string | undefined
+    try {
+      const errorBody = (await response.json()) as { detail?: string }
+      detail = errorBody.detail
+    } catch {
+      // Response body not JSON
+    }
+    throw new ApiError(
+      `API request failed: ${response.status} ${response.statusText}`,
+      response.status,
+      detail
+    )
+  }
+
+  if (!response.body) {
+    throw new NetworkError('Response body is null')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+
+      if (done) {
+        break
+      }
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // Parse SSE events from buffer
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6) // Remove 'data: ' prefix
+          if (data.trim()) {
+            try {
+              const event = JSON.parse(data) as GenerationEvent
+              onEvent(event)
+            } catch (e) {
+              console.warn('Failed to parse SSE event:', data, e)
+            }
+          }
+        }
+      }
+    }
+
+    // Process any remaining data in buffer
+    if (buffer.startsWith('data: ')) {
+      const data = buffer.slice(6)
+      if (data.trim()) {
+        try {
+          const event = JSON.parse(data) as GenerationEvent
+          onEvent(event)
+        } catch (e) {
+          console.warn('Failed to parse final SSE event:', data, e)
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 // --- Connection Status ---

@@ -31,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger('qwen.server')
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import (
@@ -236,6 +237,27 @@ class GenerationStatus(BaseModel):
         default_factory=_empty_queued_list,
         description="Session IDs waiting in queue",
     )
+
+
+# --- SSE Event Types ---
+
+
+from typing import Literal
+
+
+class GenerationEvent(BaseModel):
+    """Server-Sent Event for generation progress."""
+
+    type: Literal["round_start", "generating", "tool_start", "tool_end", "complete", "error"]
+    round: int | None = Field(None, description="Current round number (1-indexed)")
+    max_rounds: int | None = Field(None, description="Maximum rounds allowed")
+    tool_name: str | None = Field(None, description="Tool being executed")
+    tool_args: dict[str, Any] | None = Field(None, description="Tool arguments (truncated)")
+    session: SessionModel | None = Field(None, description="Final session state (on complete)")
+    response: ChatResponseModel | None = Field(None, description="Final response (on complete)")
+    queue_stats: QueueStats | None = Field(None, description="Queue stats (on complete)")
+    error: str | None = Field(None, description="Error message (on error)")
+    timestamp: float = Field(default_factory=time.time, description="Event timestamp")
 
 
 # --- Application State ---
@@ -852,6 +874,209 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
         session=_session_to_model(session),
         response=chat_response,
         queue_stats=queue_stats,
+    )
+
+
+@app.post("/v1/sessions/{session_id}/chat/stream")
+async def session_chat_stream(session_id: str, request: SessionChatRequest):
+    """
+    Send a message and stream generation progress via Server-Sent Events.
+    
+    This endpoint streams real-time events during generation:
+    - round_start: New inference round started
+    - generating: Model is thinking
+    - tool_start: Tool execution started
+    - tool_end: Tool execution finished
+    - complete: Generation finished (includes full session)
+    - error: An error occurred
+    
+    Events are sent as SSE (text/event-stream):
+        data: {"type": "generating", "round": 1, "max_rounds": 5}
+        
+        data: {"type": "tool_start", "tool_name": "browser_navigate", ...}
+        
+        data: {"type": "complete", "session": {...}, "response": {...}}
+    """
+    start_time = time.perf_counter()
+    logger.info(f"📨 POST /v1/sessions/{session_id[:8]}.../chat/stream - message: {request.message[:50]}...")
+
+    # Validate model size
+    size_map: dict[str, ModelSize] = {
+        "small": ModelSize.SMALL,
+        "medium": ModelSize.MEDIUM,
+        "large": ModelSize.LARGE,
+    }
+    model_size = size_map.get(request.model_size.lower())
+    if model_size is None:
+        logger.error(f"Invalid model_size: {request.model_size}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid model_size: {request.model_size}"
+        )
+
+    # Load session
+    store = get_session_store()
+    session = store.get(session_id)
+    if session is None:
+        logger.error(f"Session not found: {session_id}")
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    logger.debug(f"Loaded session: profile={session.profile_name}, messages={len(session.messages)}")
+
+    # Validate profile
+    if session.profile_name not in AGENT_PROFILES:
+        logger.error(f"Unknown profile: {session.profile_name}")
+        raise HTTPException(
+            status_code=400, detail=f"Unknown profile: {session.profile_name}"
+        )
+
+    # Add user message immediately (before generation)
+    session.add_message(role="user", content=request.message)
+    logger.debug(f"Added user message to session, now has {len(session.messages)} messages")
+
+    # Add to queue and get position atomically
+    queue_position = app_state.add_to_queue(session_id)
+    queue_enter_time = time.perf_counter()
+
+    # Cooperative yield
+    await asyncio.sleep(0)
+
+    async def event_generator():
+        """Generator that yields SSE events during generation."""
+        nonlocal session  # Need to update session after generation
+        acquired_lock = False
+        was_queued = False
+        queue_wait_ms = 0.0
+        
+        # Queue for events from chat_async callback
+        event_queue: asyncio.Queue[dict] = asyncio.Queue()
+        
+        async def on_event(event: dict) -> None:
+            """Callback to receive events from chat_async."""
+            await event_queue.put(event)
+        
+        try:
+            async with asyncio.timeout(1800):
+                async with app_state.generation_lock:
+                    acquired_lock = True
+                    lock_acquired_time = time.perf_counter()
+                    queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
+                    was_queued = queue_wait_ms > 10
+                    
+                    logger.info(f"🔓 [STREAM] Session {session_id[:8]} acquired lock (waited {queue_wait_ms:.0f}ms)")
+                    
+                    app_state.set_generating(True, session_id=session_id)
+                    
+                    try:
+                        service = app_state.get_chat_service(model_size)
+                        
+                        history: list[ChatMessage] = [
+                            ChatMessage(msg.role, msg.content)
+                            for msg in session.messages[:-1]
+                        ]
+                        
+                        logger.info(f"🤖 [STREAM] Starting generation for session {session_id[:8]}...")
+                        gen_start = time.perf_counter()
+                        
+                        # Create a task for chat_async that puts events in the queue
+                        async def run_chat():
+                            return await service.chat_async(
+                                user_message=request.message,
+                                profile_name=session.profile_name,
+                                conversation_history=history,
+                                verbose=request.verbose,
+                                on_event=on_event,
+                            )
+                        
+                        chat_task = asyncio.create_task(run_chat())
+                        
+                        # Stream events as they arrive
+                        while not chat_task.done():
+                            try:
+                                # Wait for event with short timeout so we can check if task is done
+                                event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                                yield f"data: {json.dumps(event)}\n\n"
+                            except asyncio.TimeoutError:
+                                continue
+                        
+                        # Drain any remaining events
+                        while not event_queue.empty():
+                            event = event_queue.get_nowait()
+                            yield f"data: {json.dumps(event)}\n\n"
+                        
+                        # Get the result
+                        result = await chat_task
+                        
+                        gen_elapsed = (time.perf_counter() - gen_start) * 1000
+                        logger.info(f"🤖 [STREAM] Generation complete in {gen_elapsed:.0f}ms")
+                        
+                        # Add assistant message
+                        session.add_message(
+                            role="assistant",
+                            content=result.content,
+                            tool_calls=[{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
+                            tool_results=[{"tool_name": tr.tool_name, "result": tr.result} for tr in result.tool_results],
+                        )
+                        
+                        # Save session
+                        store.save(session)
+                        
+                        # Send complete event
+                        latency_ms = (time.perf_counter() - start_time) * 1000
+                        complete_event = GenerationEvent(
+                            type="complete",
+                            session=_session_to_model(session),
+                            response=ChatResponseModel(
+                                content=result.content,
+                                tool_calls=[{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
+                                tool_results=[{"tool_name": tr.tool_name, "result": tr.result} for tr in result.tool_results],
+                                rounds_used=result.rounds_used,
+                                finished=result.finished,
+                                latency_ms=latency_ms,
+                            ),
+                            queue_stats=QueueStats(
+                                was_queued=was_queued,
+                                queue_wait_ms=queue_wait_ms,
+                                queue_position=queue_position,
+                            ),
+                        )
+                        yield f"data: {complete_event.model_dump_json()}\n\n"
+                        
+                    finally:
+                        app_state.set_generating(False)
+                        app_state.remove_from_queue(session_id)
+                        
+        except asyncio.TimeoutError:
+            if not acquired_lock:
+                logger.error(f"⏰ [STREAM] Session {session_id[:8]} timed out waiting for lock")
+                app_state.remove_from_queue(session_id)
+                error_event = GenerationEvent(
+                    type="error",
+                    error="Timed out after 30 minutes waiting for another request to finish.",
+                )
+                yield f"data: {error_event.model_dump_json()}\n\n"
+            else:
+                logger.error(f"⏰ [STREAM] Session {session_id[:8]} generation timed out")
+                error_event = GenerationEvent(
+                    type="error",
+                    error="Generation timed out after 30 minutes. Try a simpler request.",
+                )
+                yield f"data: {error_event.model_dump_json()}\n\n"
+        except Exception as e:
+            logger.error(f"❌ [STREAM] Session {session_id[:8]} error: {e}")
+            error_event = GenerationEvent(
+                type="error",
+                error=str(e),
+            )
+            yield f"data: {error_event.model_dump_json()}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
     )
 
 

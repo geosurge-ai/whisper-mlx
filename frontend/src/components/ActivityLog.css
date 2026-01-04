@@ -1,0 +1,208 @@
+/**
+ * ActivityLog - Styles for collapsible activity panel
+ */
+
+.activity-log {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-2);
+  overflow: hidden;
+}
+
+.activity-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  transition: background-color 0.15s ease;
+}
+
+.activity-log-header:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.activity-log-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.activity-log-icon {
+  font-size: var(--text-base);
+}
+
+.activity-log-icon.active {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.activity-log-text {
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.activity-log-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.activity-log-count {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-elevated);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.activity-log-chevron {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* Content area */
+
+.activity-log-content {
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-2);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.activity-log-empty {
+  text-align: center;
+  padding: var(--space-4);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.activity-log-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.activity-log-clear {
+  display: block;
+  width: 100%;
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.activity-log-clear:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+/* Event items */
+
+.activity-event {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  background: var(--color-bg-elevated);
+}
+
+.activity-event-icon {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.activity-event-message {
+  flex: 1;
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+}
+
+.activity-event-time {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.activity-event-args-toggle {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.activity-event-args-toggle:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.activity-event-args {
+  width: 100%;
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Event type variants */
+
+.activity-event-tool_start {
+  flex-wrap: wrap;
+}
+
+.activity-event-tool_start .activity-event-message {
+  color: var(--color-accent);
+}
+
+.activity-event-error {
+  background: rgba(230, 57, 70, 0.1);
+}
+
+.activity-event-error .activity-event-message {
+  color: var(--color-primary);
+}
+
+.activity-event-complete .activity-event-message {
+  color: var(--color-success);
+}

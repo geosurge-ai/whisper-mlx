@@ -31,6 +31,7 @@ export default function App() {
     currentSession,
     chatLoading,
     chatError,
+    activity,
     paletteOpen,
     recentCommands,
     profilesLoading,
@@ -42,6 +43,7 @@ export default function App() {
     selectProfile,
     sendMessage,
     clearError,
+    clearActivityLog,
     openPalette,
     closePalette,
     newSession,
@@ -78,6 +80,16 @@ export default function App() {
             loading={chatLoading}
             error={chatError}
             onClearError={clearError}
+            activity={activity}
+            onClearActivityLog={clearActivityLog}
+            currentSessionId={currentSession?.id ?? null}
+            generatingSessionId={generatingSessionId}
+            generatingSessionTitle={
+              sessions.find(s => s.id === generatingSessionId)?.title ?? null
+            }
+            onGoToGeneratingSession={() => {
+              if (generatingSessionId) switchSession(generatingSessionId)
+            }}
           />
         }
         detail={
