@@ -866,9 +866,8 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                             for msg in session.messages[:-1]
                         ]
                         
-                        context_token = set_session_context(session_id)
-                        
                         async def run_chat():
+                            context_token = set_session_context(session_id)
                             try:
                                 return await service.chat_async(
                                     user_message=request.message,
