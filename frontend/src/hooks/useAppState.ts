@@ -396,11 +396,8 @@ export function useAppState() {
       debug('❌ sendMessage error:', error)
       let errorMessage = 'Failed to send message'
       if (error instanceof ApiError) {
-        if (error.status === 503) {
-          errorMessage = 'Model is busy with another request. Please wait...'
-        } else {
-          errorMessage = error.detail ?? error.message
-        }
+        // Use actual error detail from backend (includes specific timeout messages)
+        errorMessage = error.detail ?? error.message
         debug(`API error: status=${error.status}, message=${errorMessage}`)
       } else if (error instanceof NetworkError) {
         errorMessage = 'Connection lost. Please check if the daemon is running.'

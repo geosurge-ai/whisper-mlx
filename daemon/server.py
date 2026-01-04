@@ -752,10 +752,16 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
 
     logger.debug(f"Session {session_id[:8]} waiting for generation lock...")
 
+    # Track whether we acquired the lock (for cleanup in timeout handler)
+    acquired_lock = False
+
     # Acquire generation lock with timeout
+    # 30 minute timeout covers both lock wait AND generation
+    # Complex browser automation tasks can take 10+ minutes per tool call
     try:
-        async with asyncio.timeout(300):  # 5 minute timeout for lock acquisition + generation
+        async with asyncio.timeout(1800):
             async with app_state.generation_lock:
+                acquired_lock = True
                 # Calculate queue wait time
                 lock_acquired_time = time.perf_counter()
                 queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
@@ -802,18 +808,27 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                     logger.debug(f"Session {session_id[:8]} saved with {len(session.messages)} messages")
 
                 finally:
-                    # Clear generation status
+                    # Clear generation status (always runs if lock was acquired)
                     app_state.set_generating(False)
                     app_state.remove_from_queue(session_id)
 
     except asyncio.TimeoutError:
-        # Clean up queue on timeout
-        logger.error(f"⏰ Session {session_id[:8]} timed out waiting for generation")
-        app_state.remove_from_queue(session_id)
-        raise HTTPException(
-            status_code=503,
-            detail="Generation timeout - another request may be taking too long",
-        )
+        # Only cleanup if we never acquired the lock (timed out waiting)
+        # If we did acquire it, the finally block already handled cleanup
+        if not acquired_lock:
+            logger.error(f"⏰ Session {session_id[:8]} timed out waiting for lock after 30 minutes")
+            app_state.remove_from_queue(session_id)
+            raise HTTPException(
+                status_code=503,
+                detail="Timed out after 30 minutes waiting for another request to finish.",
+            )
+        else:
+            # Timeout during generation (finally block already cleaned up)
+            logger.error(f"⏰ Session {session_id[:8]} generation timed out after 30 minutes")
+            raise HTTPException(
+                status_code=503,
+                detail="Generation timed out after 30 minutes. Try a simpler request.",
+            )
 
     latency_ms = (time.perf_counter() - start_time) * 1000
 

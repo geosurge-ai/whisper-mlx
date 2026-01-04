@@ -231,3 +231,92 @@ async def test_concurrent_requests_get_unique_queue_positions(
         print(f"\n[TEST] ✓ All {N} requests got unique positions: {positions}")
         print(f"[TEST] ✓ Request {last_request_idx} (position {max_pos}) waited {queue_waits[last_request_idx]:.1f}ms")
         print(f"[TEST] ✓ Semaphore correctly serialized concurrent requests")
+
+
+@pytest.mark.asyncio
+async def test_no_double_cleanup_on_successful_completion(
+    daemon_process: subprocess.Popen[bytes],
+) -> None:
+    """
+    Regression test: verify no double cleanup happens on successful requests.
+    
+    Before the fix, both the finally block AND the except block would call
+    remove_from_queue(), causing duplicate cleanup messages:
+        📤 Session session- removed (was_in_queue=True)
+        📤 Session session- removed (was_in_queue=False) <-- double cleanup!
+    
+    After the fix, only the finally block cleans up for successful requests.
+    We verify this by running multiple sequential requests - if double cleanup
+    happened, the queue state would be corrupted.
+    """
+    limits = httpx.Limits(max_connections=10, max_keepalive_connections=10)
+    async with httpx.AsyncClient(
+        base_url=DAEMON_URL, timeout=REQUEST_TIMEOUT, limits=limits
+    ) as client:
+        # Create a session
+        resp = await client.post(
+            "/v1/sessions",
+            json={"profile_name": "general"},
+        )
+        assert resp.status_code == 200
+        session_id = resp.json()["id"]
+
+        # Send multiple sequential requests to the same session
+        # This tests that cleanup happens correctly and queue state is consistent
+        for i in range(3):
+            resp = await client.post(
+                f"/v1/sessions/{session_id}/chat",
+                json={
+                    "message": f"Say 'count {i}' and nothing else.",
+                    "model_size": "large",
+                },
+            )
+            assert resp.status_code == 200, f"Request {i} failed: {resp.text}"
+            result = resp.json()
+            
+            # Verify response structure
+            assert "queue_stats" in result
+            assert "response" in result
+            print(f"[TEST] Request {i}: position={result['queue_stats']['queue_position']}, "
+                  f"was_queued={result['queue_stats']['was_queued']}")
+
+        # Check generation status is clean (not stuck)
+        status_resp = await client.get("/v1/generation/status")
+        assert status_resp.status_code == 200
+        status = status_resp.json()
+        
+        # After all requests complete, no session should be generating or queued
+        assert status["generating_session_id"] is None, (
+            f"Generation should be idle, but found: {status['generating_session_id']}"
+        )
+        assert status["queued_session_ids"] == [], (
+            f"Queue should be empty, but found: {status['queued_session_ids']}"
+        )
+        
+        print("\n[TEST] ✓ Multiple sequential requests completed successfully")
+        print("[TEST] ✓ Queue state is clean after completion (no double cleanup corruption)")
+
+
+@pytest.mark.asyncio
+async def test_generation_status_endpoint(
+    daemon_process: subprocess.Popen[bytes],
+) -> None:
+    """
+    Test the generation status endpoint returns correct state.
+    
+    This is useful for debugging queue issues and verifying the fix.
+    """
+    async with httpx.AsyncClient(
+        base_url=DAEMON_URL, timeout=30.0
+    ) as client:
+        # When idle, should show no generation
+        resp = await client.get("/v1/generation/status")
+        assert resp.status_code == 200
+        status = resp.json()
+        
+        assert "generating_session_id" in status
+        assert "queued_session_ids" in status
+        assert isinstance(status["queued_session_ids"], list)
+        
+        print(f"\n[TEST] Generation status: {status}")
+        print("[TEST] ✓ Generation status endpoint working correctly")
