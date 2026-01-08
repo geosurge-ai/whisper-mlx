@@ -9,6 +9,11 @@ pyobjc-framework-Vision>=10.0  # macOS Vision framework for OCR
 pyobjc-framework-Quartz>=10.0  # Quartz support
 pymupdf>=1.24.0                # PDF to image conversion
 
+# Google APIs (Gmail, Calendar sync)
+google-auth>=2.0.0             # Google authentication
+google-auth-oauthlib>=1.0.0    # OAuth2 flow for Google
+google-api-python-client>=2.0.0  # Gmail and Calendar APIs
+
 # API Server
 fastapi>=0.115.0
 uvicorn>=0.32.0

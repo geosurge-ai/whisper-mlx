@@ -111,11 +111,11 @@ Playwright-based browser automation.
 
 ### OCR Tools
 
-Document text extraction using vision-language models on Apple Silicon.
+Document text extraction using macOS Vision framework.
 
 | Tool | Description |
 |------|-------------|
-| `ocr_document` | Extract text from images or PDFs using Qwen2.5-VL-7B |
+| `ocr_document` | Extract text from images or PDFs |
 
 **Supported formats:**
 - Images: PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF
@@ -135,9 +135,59 @@ curl -X POST http://127.0.0.1:5997/v1/tools/ocr_document/invoke \
   -d '{"arguments": {"file_path": "/path/to/document.pdf", "pages": "1-3", "dpi": 300}}'
 ```
 
-**Model:** Uses `mlx-community/Qwen2.5-VL-7B-Instruct-8bit` - a 7B parameter vision-language model optimized for Apple Silicon. The model is loaded lazily on first use.
+**Requirements:** `pyobjc-framework-Vision` and `pymupdf` (installed via requirements.txt)
 
-**Requirements:** `mlx-vlm` and `pymupdf` (installed via requirements.txt)
+### Google Tools
+
+Gmail and Calendar search - syncs data automatically every 5 minutes.
+
+| Tool | Description |
+|------|-------------|
+| `search_emails` | Search synced Gmail messages by query, sender, date, attachments |
+| `get_email` | Get full email content by ID |
+| `search_calendar` | Search calendar events by query, date range |
+| `get_calendar_event` | Get full event details by ID |
+
+**Setup:** Run once to authenticate with Google:
+
+```bash
+python -m daemon.sync.auth
+```
+
+This opens a browser for OAuth2 login. Credentials are stored in `~/.qwen/google_credentials.json`.
+
+**Example usage:**
+
+```bash
+# Search emails
+curl -X POST http://127.0.0.1:5997/v1/tools/search_emails/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"query": "project update", "limit": 10}}'
+
+# Search emails from a specific sender with attachments
+curl -X POST http://127.0.0.1:5997/v1/tools/search_emails/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"from_email": "boss@company.com", "has_attachment": true}}'
+
+# Get today's calendar events
+curl -X POST http://127.0.0.1:5997/v1/tools/search_calendar/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"date_range": "today"}}'
+
+# Get this week's events
+curl -X POST http://127.0.0.1:5997/v1/tools/search_calendar/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"date_range": "this_week"}}'
+```
+
+**Storage:** Data is synced to `~/.qwen/data/`:
+- `gmail/emails/*.json` - Email messages
+- `gmail/attachments/` - Email attachments
+- `calendar/events/*.json` - Calendar events
+
+**Configuration:**
+- `QWEN_SYNC_INTERVAL` - Sync interval in seconds (default: 300)
+- Initial sync fetches 1 year of history
 
 ## Creating Custom Tools
 

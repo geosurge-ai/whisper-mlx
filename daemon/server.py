@@ -379,9 +379,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     elapsed = time.time() - start_time
     logger.info(f"   ✓ Model loaded and ready in {elapsed:.1f}s!")
     
+    # Start Google sync scheduler (runs every 5 minutes)
+    try:
+        from .sync.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        logger.warning(f"Failed to start sync scheduler: {e}")
+    
     yield
     
     logger.info("👋 Qwen Daemon shutting down...")
+    
+    # Stop sync scheduler
+    try:
+        from .sync.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception as e:
+        logger.warning(f"Error stopping sync scheduler: {e}")
+    
     try:
         from .tools.browser.manager import get_browser_manager
         browser_manager = get_browser_manager()

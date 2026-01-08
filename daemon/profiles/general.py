@@ -2,7 +2,7 @@
 General profile: General-purpose assistant with all tools.
 
 A versatile profile with access to web search, browser automation,
-Linear, Slack, Python execution, and document OCR.
+Linear, Slack, Python execution, document OCR, and Gmail/Calendar search.
 """
 
 from .base import Profile
@@ -32,6 +32,12 @@ from daemon.tools.browser import (
 from daemon.tools.ocr import (
     ocr_document,
 )
+from daemon.tools.google import (
+    search_emails,
+    get_email,
+    search_calendar,
+    get_calendar_event,
+)
 
 
 # --- System Prompt ---
@@ -46,6 +52,8 @@ SYSTEM_PROMPT = """You are a helpful AI assistant with access to a variety of to
 4. **Slack**: Search team conversations and threads
 5. **Python**: Run code for calculations, data analysis, and visualizations
 6. **OCR**: Extract text from images and PDF documents
+7. **Gmail**: Search through synced emails and attachments
+8. **Calendar**: Search through synced Google Calendar events
 
 ## Tool Usage Guidelines
 
@@ -55,6 +63,8 @@ SYSTEM_PROMPT = """You are a helpful AI assistant with access to a variety of to
 - Use Linear/Slack tools for team-specific queries
 - Use `run_python` for calculations, statistics, or data transformations
 - Use `ocr_document` to extract text from images or PDFs (local processing)
+- Use `search_emails` to find emails, then `get_email` for full content
+- Use `search_calendar` to find events (supports "today", "this_week", "next_week")
 
 ## Response Style
 
@@ -92,6 +102,11 @@ TOOLS = (
     lookup_user,
     # OCR
     ocr_document,
+    # Gmail & Calendar
+    search_emails,
+    get_email,
+    search_calendar,
+    get_calendar_event,
 )
 
 

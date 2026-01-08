@@ -219,4 +219,14 @@ def _populate_registry(registry: ToolRegistry) -> None:
     for name in ocr_tools:
         registry.register_lazy(name, f"daemon.tools.ocr.{name}", "TOOL")
 
+    # Google tools (Gmail, Calendar)
+    google_tools = [
+        "search_emails",
+        "get_email",
+        "search_calendar",
+        "get_calendar_event",
+    ]
+    for name in google_tools:
+        registry.register_lazy(name, f"daemon.tools.google.{name}", "TOOL")
+
     logger.info(f"Registry populated with {len(registry.available_tools)} tools (lazy)")
