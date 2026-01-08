@@ -11,6 +11,7 @@ Data sources:
 - Slack mirror: conversations, threads, profiles (JSONL format)
 """
 
+import contextvars
 import json
 import os
 import re
@@ -28,9 +29,44 @@ from llm import Tool, ToolCallingAgent
 
 DEFAULT_LINEAR_MIRROR = Path.home() / "Github" / "vibe-os" / "linear_mirror"
 DEFAULT_SLACK_MIRROR = Path.home() / "Github" / "vibe-os" / "slack_mirror"
+DEFAULT_DATA_DIR = Path(__file__).parent / "data"
 
 LINEAR_MIRROR_DIR = Path(os.environ.get("LINEAR_MIRROR_DIR", DEFAULT_LINEAR_MIRROR))
 SLACK_MIRROR_DIR = Path(os.environ.get("VIBEOS_SLACK_MIRROR_DIR", DEFAULT_SLACK_MIRROR))
+DATA_DIR = Path(os.environ.get("MIRROR_DATA_DIR", DEFAULT_DATA_DIR))
+
+
+# --- Session Context for Tools ---
+# This allows tools like run_python to know which session they're running in
+# so they can save outputs to the session's assets directory.
+
+_current_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_session_id", default=None
+)
+
+
+def set_session_context(session_id: str | None) -> contextvars.Token:
+    """Set the current session context for tools. Returns a token to reset later."""
+    return _current_session_id.set(session_id)
+
+
+def get_session_context() -> str | None:
+    """Get the current session ID, or None if not in a session context."""
+    return _current_session_id.get()
+
+
+def reset_session_context(token: contextvars.Token) -> None:
+    """Reset the session context to its previous value."""
+    _current_session_id.reset(token)
+
+
+def get_session_assets_dir(session_id: str) -> Path:
+    """Get the assets directory for a session, creating it if needed."""
+    # Sanitize session_id to prevent path traversal
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+    assets_dir = DATA_DIR / "sessions" / safe_id / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    return assets_dir
 
 
 # --- Data Types ---
@@ -689,13 +725,13 @@ def list_recent_slack_activity(
     page: int = 0,
 ) -> str:
     """
-    List recent Slack messages to see what people are talking about.
+    List active Slack threads/conversations from the time period.
 
-    No search query needed - returns the most recent messages across channels.
-    Great for getting a pulse on team discussions.
+    Aggregates messages by thread and returns threads sorted by activity
+    (most recent message first). Shows thread metadata including reply count,
+    participants, and a preview of the conversation topic.
     
-    Use pagination (page parameter) to browse through more messages if needed.
-    Start with page 0, then request page 1, 2, etc. to see older messages.
+    Use pagination to browse more threads.
     """
     store = get_data_store()
 
@@ -703,87 +739,122 @@ def list_recent_slack_activity(
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     cutoff_ts = str(cutoff.timestamp())
 
-    messages = []
+    # Aggregate messages by thread
+    # Key: (channel_id, thread_ts or message_ts for non-threaded)
+    threads: dict[tuple[str, str], dict] = {}
 
-    # Collect recent messages from conversations
+    # Collect messages from conversations (these are thread starters or standalone)
     for channel_id, msg in store.stream_slack_conversations():
         if channel and channel.lower() not in channel_id.lower():
             continue
 
-        # Filter by timestamp
-        if msg.ts < cutoff_ts:
-            continue
-
-        # Skip empty messages
         if not msg.text or not msg.text.strip():
             continue
 
-        messages.append(
-            {
-                "source": "conversation",
+        # Use thread_ts if it's a thread, otherwise use message ts
+        thread_key = (channel_id, msg.thread_ts or msg.ts)
+        
+        if thread_key not in threads:
+            threads[thread_key] = {
                 "channel_id": channel_id,
-                "thread_ts": msg.thread_ts,
-                "ts": msg.ts,
-                "user": store.resolve_slack_user(msg.user),
-                "text": msg.text[:300] if len(msg.text) > 300 else msg.text,
-                "reply_count": msg.reply_count,
+                "thread_ts": msg.thread_ts or msg.ts,
+                "first_message": msg.text[:200] if len(msg.text) > 200 else msg.text,
+                "first_author": store.resolve_slack_user(msg.user),
+                "reply_count": msg.reply_count or 0,
+                "participants": set(),
+                "last_activity_ts": msg.ts,
+                "recent_message_count": 0,
             }
-        )
+        
+        thread = threads[thread_key]
+        if msg.user:
+            thread["participants"].add(store.resolve_slack_user(msg.user))
+        
+        # Track activity within the time window
+        if msg.ts >= cutoff_ts:
+            thread["recent_message_count"] += 1
+            if msg.ts > thread["last_activity_ts"]:
+                thread["last_activity_ts"] = msg.ts
 
-    # Also collect recent thread messages
-    thread_count = 0
-    max_threads = 500
+    # Collect thread replies
     for channel_id, thread_ts, msg in store.stream_slack_threads():
-        if thread_count > max_threads:
-            break
-        thread_count += 1
-
         if channel and channel.lower() not in channel_id.lower():
             continue
 
-        if msg.ts < cutoff_ts:
-            continue
-
         if not msg.text or not msg.text.strip():
             continue
 
-        messages.append(
-            {
-                "source": "thread",
+        thread_key = (channel_id, thread_ts)
+        
+        if thread_key not in threads:
+            # Thread starter wasn't in conversations, create entry
+            threads[thread_key] = {
                 "channel_id": channel_id,
                 "thread_ts": thread_ts,
-                "ts": msg.ts,
-                "user": store.resolve_slack_user(msg.user),
-                "text": msg.text[:300] if len(msg.text) > 300 else msg.text,
+                "first_message": msg.text[:200] if len(msg.text) > 200 else msg.text,
+                "first_author": store.resolve_slack_user(msg.user),
+                "reply_count": 0,
+                "participants": set(),
+                "last_activity_ts": msg.ts,
+                "recent_message_count": 0,
             }
-        )
+        
+        thread = threads[thread_key]
+        if msg.user:
+            thread["participants"].add(store.resolve_slack_user(msg.user))
+        thread["reply_count"] += 1
+        
+        # Track activity within the time window
+        if msg.ts >= cutoff_ts:
+            thread["recent_message_count"] += 1
+            if msg.ts > thread["last_activity_ts"]:
+                thread["last_activity_ts"] = msg.ts
 
-    # Sort by timestamp descending (most recent first)
-    messages.sort(key=lambda m: m["ts"], reverse=True)
+    # Filter to threads with recent activity
+    active_threads = [
+        t for t in threads.values()
+        if t["recent_message_count"] > 0
+    ]
+
+    # Sort by last activity (most recent first)
+    active_threads.sort(key=lambda t: t["last_activity_ts"], reverse=True)
 
     # Paginate
-    total = len(messages)
+    total = len(active_threads)
     start = page * limit
     end = start + limit
-    page_items = messages[start:end]
+    page_items = active_threads[start:end]
 
-    # Convert timestamps to readable dates for context
-    for msg in page_items:
+    # Format for output
+    formatted_threads = []
+    for thread in page_items:
         try:
-            ts_float = float(msg["ts"])
+            ts_float = float(thread["last_activity_ts"])
             dt = datetime.fromtimestamp(ts_float, tz=timezone.utc)
-            msg["date"] = dt.strftime("%Y-%m-%d %H:%M")
+            last_activity = dt.strftime("%Y-%m-%d %H:%M")
         except (ValueError, TypeError):
-            msg["date"] = "unknown"
+            last_activity = "unknown"
+
+        formatted_threads.append({
+            "channel_id": thread["channel_id"],
+            "thread_ts": thread["thread_ts"],
+            "topic_preview": thread["first_message"],
+            "started_by": thread["first_author"],
+            "reply_count": thread["reply_count"],
+            "recent_messages": thread["recent_message_count"],
+            "participants": list(thread["participants"])[:5],  # Top 5 participants
+            "participant_count": len(thread["participants"]),
+            "last_activity": last_activity,
+        })
 
     return json.dumps(
         {
-            "total": total,
+            "total_active_threads": total,
             "page": page,
             "page_size": limit,
             "has_more": end < total,
             "since_days": since_days,
-            "messages": page_items,
+            "threads": formatted_threads,
         }
     )
 
@@ -899,22 +970,17 @@ def get_current_datetime() -> str:
     )
 
 
-def run_python(code: str, timeout: int = 30) -> str:
+def _execute_python_code(code: str, output_dir: str, result_queue) -> None:
     """
-    Execute Python code and return the output.
+    Execute Python code in a subprocess.
     
-    Full Python environment with access to:
-    - pandas, numpy, scipy for data analysis
-    - matplotlib, seaborn, plotly for visualization
-    - All standard library modules
-    
-    Code is executed in the daemon's Python process.
-    Use print() to output results.
+    This function runs in a separate process for isolation and timeout safety.
+    Results are put into result_queue.
     """
     import io
     import sys
     import traceback
-    import signal
+    import os
     
     # Capture stdout and stderr
     old_stdout = sys.stdout
@@ -930,41 +996,38 @@ def run_python(code: str, timeout: int = 30) -> str:
         "return_value": None,
     }
     
-    # Timeout handler
-    def timeout_handler(signum, frame):
-        raise TimeoutError(f"Code execution exceeded {timeout} seconds")
-    
     try:
-        # Set up timeout (Unix only)
-        if hasattr(signal, 'SIGALRM'):
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout)
-        
         # Redirect stdout/stderr
         sys.stdout = captured_stdout
         sys.stderr = captured_stderr
         
         # Create execution namespace with useful imports pre-loaded
+        # and OUTPUT_DIR for saving visualizations
         exec_globals = {
             "__builtins__": __builtins__,
             "__name__": "__main__",
+            "OUTPUT_DIR": output_dir,
         }
+        
+        # Configure matplotlib to use non-interactive backend and save to OUTPUT_DIR
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # Non-interactive backend
+            import matplotlib.pyplot as plt
+            # Set default save path
+            plt.rcParams['savefig.directory'] = output_dir
+        except ImportError:
+            pass
         
         # Execute the code
         exec(code, exec_globals)
         
         result["success"] = True
         
-    except TimeoutError as e:
-        result["error"] = str(e)
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {str(e)}"
         result["stderr"] = traceback.format_exc()
     finally:
-        # Cancel timeout
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        
         # Restore stdout/stderr
         sys.stdout = old_stdout
         sys.stderr = old_stderr
@@ -972,6 +1035,130 @@ def run_python(code: str, timeout: int = 30) -> str:
         # Capture output
         result["stdout"] = captured_stdout.getvalue()
         result["stderr"] = captured_stderr.getvalue() or result.get("stderr", "")
+    
+    result_queue.put(result)
+
+
+def run_python(code: str, timeout: int = 30) -> str:
+    """
+    Execute Python code and return the output.
+    
+    Full Python environment with access to:
+    - pandas, numpy, scipy for data analysis
+    - matplotlib, seaborn, plotly for visualization
+    - All standard library modules
+    
+    Code runs in an isolated subprocess with timeout protection.
+    Use print() to output results.
+    
+    For visualizations:
+    - Use plt.savefig(f"{OUTPUT_DIR}/chart.png") to save figures
+    - Generated images are returned as base64 data URIs
+    - Images are saved to the session's assets directory for persistence
+    """
+    import multiprocessing
+    import tempfile
+    import base64
+    import os
+    import shutil
+    
+    # Determine output directory:
+    # - If in session context, use session's persistent assets dir
+    # - Otherwise, use a temp directory
+    session_id = get_session_context()
+    using_session_dir = session_id is not None
+    
+    if using_session_dir:
+        output_dir = str(get_session_assets_dir(session_id))
+        temp_dir_context = None
+    else:
+        # Fall back to temp directory (for testing or non-session usage)
+        temp_dir_context = tempfile.TemporaryDirectory(prefix="run_python_")
+        output_dir = temp_dir_context.name
+    
+    try:
+        # Use fork context on Unix for better compatibility
+        # (spawn context has issues with pickling functions)
+        try:
+            ctx = multiprocessing.get_context('fork')
+        except ValueError:
+            # Fall back to default if fork not available (Windows)
+            ctx = multiprocessing.get_context()
+        
+        result_queue = ctx.Queue()
+        process = ctx.Process(
+            target=_execute_python_code,
+            args=(code, output_dir, result_queue)
+        )
+        process.start()
+        process.join(timeout=timeout)
+        
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1)
+            return json.dumps({
+                "success": False,
+                "stdout": "",
+                "stderr": "",
+                "error": f"Code execution exceeded {timeout} seconds (timeout)",
+                "return_value": None,
+                "images": [],
+            })
+        
+        # Get result from queue
+        try:
+            result = result_queue.get_nowait()
+        except Exception:
+            result = {
+                "success": False,
+                "stdout": "",
+                "stderr": "",
+                "error": "Failed to get result from subprocess",
+                "return_value": None,
+            }
+        
+        # Scan output directory for generated image files
+        images = []
+        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'}
+        
+        for filename in os.listdir(output_dir):
+            filepath = os.path.join(output_dir, filename)
+            if os.path.isfile(filepath):
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in image_extensions:
+                    # Read and encode as base64
+                    with open(filepath, 'rb') as f:
+                        data = f.read()
+                    
+                    # Determine MIME type
+                    mime_types = {
+                        '.png': 'image/png',
+                        '.jpg': 'image/jpeg',
+                        '.jpeg': 'image/jpeg',
+                        '.gif': 'image/gif',
+                        '.svg': 'image/svg+xml',
+                        '.webp': 'image/webp',
+                    }
+                    mime_type = mime_types.get(ext, 'application/octet-stream')
+                    
+                    # Create data URI for embedding in response
+                    b64_data = base64.b64encode(data).decode('utf-8')
+                    data_uri = f"data:{mime_type};base64,{b64_data}"
+                    
+                    images.append({
+                        "filename": filename,
+                        "data": data_uri,
+                        "persisted": using_session_dir,
+                    })
+        
+        result["images"] = images
+        if using_session_dir and session_id:
+            result["assets_dir"] = f"sessions/{session_id}/assets"
+        
+    finally:
+        # Clean up temp directory if we used one
+        if temp_dir_context is not None:
+            temp_dir_context.cleanup()
     
     return json.dumps(result)
 
@@ -991,13 +1178,13 @@ MIRROR_TOOLS = [
     ),
     Tool(
         name="run_python",
-        description="Execute Python code and return output. Full Python environment with pandas, numpy, scipy, matplotlib, seaborn, plotly available. Use for data analysis, calculations, statistics, or generating visualizations. Use print() to output results.",
+        description="Execute Python code and return output. Full Python environment with pandas, numpy, scipy, matplotlib, seaborn, plotly available. Use for data analysis, calculations, statistics, or generating visualizations. Use print() for output. For charts, save to OUTPUT_DIR: plt.savefig(f'{OUTPUT_DIR}/chart.png'). Generated images are returned as embedded base64.",
         parameters={
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code to execute. Use print() for output. Can import any installed package.",
+                    "description": "Python code to execute. Use print() for output. For visualizations, save to OUTPUT_DIR variable (e.g., plt.savefig(f'{OUTPUT_DIR}/chart.png')).",
                 },
                 "timeout": {
                     "type": "integer",
@@ -1137,7 +1324,7 @@ MIRROR_TOOLS = [
     ),
     Tool(
         name="list_recent_slack_activity",
-        description="List recent Slack messages without needing a search query. Use this to see what people are talking about, get a pulse on team discussions, or answer 'what's happening on Slack' questions. Use pagination to browse more - start with page 0, then 1, 2, etc. Use get_current_datetime first to understand 'today'.",
+        description="List active Slack threads/conversations. Aggregates messages by thread and returns threads sorted by recent activity. Shows thread topic, reply count, participants, and last activity. Use get_current_datetime first for time-based queries.",
         parameters={
             "type": "object",
             "properties": {
@@ -1151,11 +1338,11 @@ MIRROR_TOOLS = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max results per page (default 15, keep small to fit context)",
+                    "description": "Max threads per page (default 15)",
                 },
                 "page": {
                     "type": "integer",
-                    "description": "Page number for pagination (0-indexed). Use to browse more messages.",
+                    "description": "Page number for pagination (0-indexed)",
                 },
             },
             "required": [],
@@ -1194,6 +1381,15 @@ SYSTEM_PROMPT = """You are a knowledge assistant with access to your team's Line
 1. **Linear Mirror**: All issues, comments, and activity events from your Linear workspace
 2. **Slack Mirror**: Conversations and threads from your Slack workspace
 3. **Python**: Full data science environment for analysis and visualization
+
+## IMPORTANT: Slack Data Limitations
+
+**Slack data contains ONLY channel IDs (like C08TFUS2MU5), NOT human-readable channel names.**
+
+- Do NOT invent or guess channel names like "#project-migration" or "#tech-discuss"
+- Use the actual channel IDs from the data when referring to channels
+- Identify conversations by their thread topics and participants, not by channel names
+- If the user asks about specific channels, work with IDs or ask them to clarify which ID they mean
 
 ## How to Answer Questions
 

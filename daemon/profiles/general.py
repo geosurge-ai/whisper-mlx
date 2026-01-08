@@ -2,7 +2,7 @@
 General profile: General-purpose assistant with all tools.
 
 A versatile profile with access to web search, browser automation,
-Linear, Slack, and Python execution.
+Linear, Slack, Python execution, and document OCR.
 """
 
 from .base import Profile
@@ -29,6 +29,9 @@ from daemon.tools.browser import (
     browser_press_key,
     browser_analyze_page,
 )
+from daemon.tools.ocr import (
+    ocr_document,
+)
 
 
 # --- System Prompt ---
@@ -42,6 +45,7 @@ SYSTEM_PROMPT = """You are a helpful AI assistant with access to a variety of to
 3. **Linear**: Access project management data (issues, events, activity)
 4. **Slack**: Search team conversations and threads
 5. **Python**: Run code for calculations, data analysis, and visualizations
+6. **OCR**: Extract text from images and PDF documents
 
 ## Tool Usage Guidelines
 
@@ -50,6 +54,7 @@ SYSTEM_PROMPT = """You are a helpful AI assistant with access to a variety of to
 - Use browser tools to explore specific websites when needed
 - Use Linear/Slack tools for team-specific queries
 - Use `run_python` for calculations, statistics, or data transformations
+- Use `ocr_document` to extract text from images or PDFs (local processing)
 
 ## Response Style
 
@@ -85,6 +90,8 @@ TOOLS = (
     get_slack_thread,
     list_recent_slack_activity,
     lookup_user,
+    # OCR
+    ocr_document,
 )
 
 

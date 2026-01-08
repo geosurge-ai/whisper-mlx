@@ -24,7 +24,7 @@ logger = logging.getLogger("qwen.tools")
 class ToolRegistry:
     """
     Central registry for tool implementations.
-    
+
     Provides:
     - Tool registration (direct or lazy)
     - Tool lookup by name
@@ -44,7 +44,7 @@ class ToolRegistry:
     def register_lazy(self, name: str, module_path: str, attr: str = "TOOL") -> None:
         """
         Register a lazy loader for a tool.
-        
+
         The tool module will be imported and the attr accessed on first use.
         """
         self._lazy_loaders[name] = (module_path, attr)
@@ -54,7 +54,7 @@ class ToolRegistry:
         """Load a lazily-registered tool."""
         if name not in self._lazy_loaders:
             return None
-        
+
         module_path, attr = self._lazy_loaders[name]
         try:
             import importlib
@@ -86,7 +86,7 @@ class ToolRegistry:
     def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """
         Execute a SYNC tool by name with given arguments.
-        
+
         Returns JSON string result or error.
         NOTE: For async tools, use execute_async() instead.
         """
@@ -108,11 +108,11 @@ class ToolRegistry:
     async def execute_async(self, name: str, arguments: dict[str, Any]) -> str:
         """
         Execute a tool by name with given arguments (async-aware).
-        
+
         Handles both sync and async tools:
         - Async tools are awaited directly
         - Sync tools are run in a thread pool to avoid blocking
-        
+
         Returns JSON string result or error.
         """
         tool = self.get(name)
@@ -178,7 +178,7 @@ def get_registry() -> ToolRegistry:
 def _populate_registry(registry: ToolRegistry) -> None:
     """
     Populate registry with all available tools via lazy loading.
-    
+
     Tools are loaded on-demand from their respective modules.
     """
     # Mirror tools
@@ -211,5 +211,12 @@ def _populate_registry(registry: ToolRegistry) -> None:
     ]
     for name in browser_tools:
         registry.register_lazy(name, f"daemon.tools.browser.{name}", "TOOL")
+
+    # OCR tools
+    ocr_tools = [
+        "ocr_document",
+    ]
+    for name in ocr_tools:
+        registry.register_lazy(name, f"daemon.tools.ocr.{name}", "TOOL")
 
     logger.info(f"Registry populated with {len(registry.available_tools)} tools (lazy)")

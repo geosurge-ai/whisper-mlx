@@ -164,3 +164,139 @@
   word-break: break-word;
   line-height: 1.5;
 }
+
+/* --- Tool Arguments Display --- */
+
+.tool-args-display {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.tool-args-json {
+  margin: 0;
+}
+
+.tool-args-code {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.tool-args-code-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-medium);
+}
+
+.tool-args-code-block {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  padding: var(--space-4);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0;
+  white-space: pre;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+
+/* --- Tool Result Display --- */
+
+.tool-result-display {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Images */
+
+.tool-result-images {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.tool-result-image {
+  margin: 0;
+  padding: 0;
+}
+
+.tool-result-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-bg-primary);
+}
+
+.tool-result-image figcaption {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  margin-top: var(--space-1);
+  font-family: var(--font-mono);
+}
+
+/* Stdout / Output */
+
+.tool-result-stdout,
+.tool-result-stderr,
+.tool-result-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.tool-result-stdout-label,
+.tool-result-stderr-label,
+.tool-result-error-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-tertiary);
+}
+
+.tool-result-stdout-text,
+.tool-result-stderr-text,
+.tool-result-error-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background-color: var(--color-bg-secondary);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.tool-result-error {
+  background-color: rgba(230, 57, 70, 0.05);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(230, 57, 70, 0.2);
+}
+
+.tool-result-error-label {
+  color: var(--color-primary);
+}
+
+.tool-result-error-text {
+  background-color: rgba(230, 57, 70, 0.1);
+  color: var(--color-primary);
+}
+
+/* Image badge */
+
+.tool-call-result-badge-image {
+  background-color: rgba(69, 123, 157, 0.15);
+  color: var(--color-accent);
+  margin-left: var(--space-2);
+}

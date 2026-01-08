@@ -352,6 +352,15 @@
   border-radius: var(--radius-sm);
 }
 
+/* --- Activity Log (positioned between messages and composer) --- */
+
+.chat-view > .activity-log {
+  flex-shrink: 0;
+  margin: 0 var(--space-6);
+  max-height: 250px;
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+
 /* --- Error Banner --- */
 
 .chat-error {

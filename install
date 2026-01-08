@@ -1,4 +1,45 @@
-python -m venv .venv
+#!/usr/bin/env bash
+# Install Python dependencies into a local venv
+# Run this inside nix-shell: nix develop --command ./install
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# Ensure we're in nix shell
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+    echo "🔄 Running inside nix-shell..."
+    exec nix develop --command "$0" "$@"
+fi
+
+echo "🐍 Setting up Python environment..."
+
+# Create venv if it doesn't exist
+if [[ ! -d ".venv" ]]; then
+    echo "📦 Creating Python virtual environment..."
+    python -m venv .venv
+else
+    echo "✓ Virtual environment already exists"
+fi
+
+# Activate venv
 source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel mlx-whisper mlx-lm huggingface_hub playwright ddgs filelock
+
+# Upgrade pip and install all requirements
+echo "📥 Installing Python dependencies from requirements.txt..."
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+
+# Install Playwright browsers
+echo "🌐 Installing Playwright browsers..."
 playwright install chromium
+
+echo ""
+echo "✅ Installation complete!"
+echo ""
+echo "To activate the venv manually:"
+echo "  source .venv/bin/activate"
+echo ""
+echo "Or just run scripts directly (they auto-activate):"
+echo "  ./run-daemon"
+echo "  ./run-tests"
+echo ""

@@ -62,11 +62,16 @@ Browser automation agent for running code in online playgrounds.
 
 ### general
 
-Basic conversational assistant without tools.
+Full-featured assistant with all available tools.
 
-**Use Case**: General Q&A, explanations, writing tasks.
+**Use Case**: General Q&A, web research, document analysis, data exploration.
 
-**Tools**: None
+**Tools**: All tools from mirror, browser, and OCR categories:
+- `get_current_datetime`, `run_python`
+- `web_search`, `browser_navigate`, `browser_get_text`, `browser_click`, etc.
+- `search_linear_issues`, `get_linear_issue`, `list_linear_events`
+- `search_slack_messages`, `get_slack_thread`, `list_recent_slack_activity`, `lookup_user`
+- `ocr_document`
 
 **Settings**:
 - Max Tool Rounds: 8

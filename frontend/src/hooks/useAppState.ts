@@ -26,11 +26,13 @@ import type { ChatMessage, Command } from '../components'
 // --- Types ---
 
 export interface ActivityEvent {
-  type: 'round_start' | 'generating' | 'tool_start' | 'tool_end' | 'complete' | 'error'
+  type: 'round_start' | 'generating' | 'tool_start' | 'tool_end' | 'complete' | 'error' | 'thinking'
   round?: number
   maxRounds?: number
   toolName?: string
   toolArgs?: Record<string, unknown>
+  toolResult?: string
+  thinkingContent?: string
   timestamp: number
 }
 
@@ -425,6 +427,7 @@ export function useAppState() {
 
     setChatLoading(true)
     setGenerationInProgress(true)
+    setGeneratingSessionId(sendingSessionId)  // Set immediately so activity log shows
     setChatError(null)
 
     // Reset activity state for new generation
@@ -456,6 +459,8 @@ export function useAppState() {
           maxRounds: event.max_rounds,
           toolName: event.tool_name,
           toolArgs: event.tool_args,
+          toolResult: event.tool_result,
+          thinkingContent: event.content,  // For 'thinking' events
           timestamp: eventTimestamp,
         }
 
@@ -468,6 +473,14 @@ export function useAppState() {
               currentRound: event.round ?? prev.currentRound,
               maxRounds: event.max_rounds ?? prev.maxRounds,
               currentTool: null,
+              events: [...prev.events, activityEvent],
+            }))
+            break
+
+          case 'thinking':
+            // LLM reasoning content - just add to events
+            setActivity(prev => ({
+              ...prev,
               events: [...prev.events, activityEvent],
             }))
             break

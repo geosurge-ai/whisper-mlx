@@ -109,6 +109,36 @@ Playwright-based browser automation.
 | `browser_press_key` | Press keyboard key |
 | `browser_analyze_page` | Analyze page structure |
 
+### OCR Tools
+
+Document text extraction using vision-language models on Apple Silicon.
+
+| Tool | Description |
+|------|-------------|
+| `ocr_document` | Extract text from images or PDFs using Qwen2.5-VL-7B |
+
+**Supported formats:**
+- Images: PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF
+- Documents: PDF (multi-page support)
+
+**Example usage:**
+
+```bash
+# OCR an image
+curl -X POST http://127.0.0.1:5997/v1/tools/ocr_document/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"file_path": "/path/to/document.png"}}'
+
+# OCR specific pages of a PDF
+curl -X POST http://127.0.0.1:5997/v1/tools/ocr_document/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"file_path": "/path/to/document.pdf", "pages": "1-3", "dpi": 300}}'
+```
+
+**Model:** Uses `mlx-community/Qwen2.5-VL-7B-Instruct-8bit` - a 7B parameter vision-language model optimized for Apple Silicon. The model is loaded lazily on first use.
+
+**Requirements:** `mlx-vlm` and `pymupdf` (installed via requirements.txt)
+
 ## Creating Custom Tools
 
 ### Using the @tool Decorator

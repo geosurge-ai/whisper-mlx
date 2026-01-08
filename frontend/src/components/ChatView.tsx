@@ -147,14 +147,15 @@ export function ChatView({
                 onNavigate={onGoToGeneratingSession}
               />
             )}
-            {/* Show activity log when generating or has events */}
-            {activity && (activity.status !== 'idle' || activity.events.length > 0) && (
-              <ActivityLog activity={activity} onClear={onClearActivityLog} />
-            )}
             <div ref={messagesEndRef} />
           </>
         )}
       </div>
+
+      {/* Activity Log - positioned above composer for visibility */}
+      {activity && loading && generatingSessionId === currentSessionId && (
+        <ActivityLog activity={activity} onClear={onClearActivityLog} />
+      )}
 
       {/* Error Banner */}
       {error && (

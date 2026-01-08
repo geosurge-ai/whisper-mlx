@@ -102,8 +102,38 @@ export function ActivityLog({ activity, onClear }: ActivityLogProps) {
   )
 }
 
+/**
+ * Pretty-prints tool arguments, with special handling for code fields
+ */
+function ToolArgsDisplay({ args }: { args: Record<string, unknown> }) {
+  // Check if there's a 'code' field that should be displayed specially
+  const hasCode = 'code' in args && typeof args.code === 'string'
+  const codeValue = hasCode ? (args.code as string) : null
+  const otherArgs = hasCode
+    ? Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'code'))
+    : args
+
+  return (
+    <>
+      {/* Show non-code args as formatted JSON */}
+      {Object.keys(otherArgs).length > 0 && (
+        <pre className="activity-event-args-json">
+          {JSON.stringify(otherArgs, null, 2)}
+        </pre>
+      )}
+      {/* Show code with proper formatting */}
+      {codeValue && (
+        <div className="activity-event-code">
+          <div className="activity-event-code-label">code:</div>
+          <pre className="activity-event-code-block">{codeValue}</pre>
+        </div>
+      )}
+    </>
+  )
+}
+
 function ActivityEventItem({ event }: { event: ActivityEvent }) {
-  const [showArgs, setShowArgs] = useState(false)
+  const [showDetails, setShowDetails] = useState(false)
 
   const getIcon = () => {
     switch (event.type) {
@@ -111,6 +141,8 @@ function ActivityEventItem({ event }: { event: ActivityEvent }) {
         return '🔄'
       case 'generating':
         return '🧠'
+      case 'thinking':
+        return '💭'
       case 'tool_start':
         return '▶️'
       case 'tool_end':
@@ -129,7 +161,9 @@ function ActivityEventItem({ event }: { event: ActivityEvent }) {
       case 'round_start':
         return `Round ${event.round}/${event.maxRounds} started`
       case 'generating':
-        return `Model thinking...`
+        return `Model generating...`
+      case 'thinking':
+        return `LLM reasoning`
       case 'tool_start':
         return `${event.toolName}`
       case 'tool_end':
@@ -156,25 +190,47 @@ function ActivityEventItem({ event }: { event: ActivityEvent }) {
     })
   }
 
+  // Check if this event has expandable content
+  const hasExpandableContent = 
+    (event.type === 'tool_start' && event.toolArgs) ||
+    (event.type === 'tool_end' && event.toolResult) ||
+    (event.type === 'thinking' && event.thinkingContent)
+
   return (
     <li className={`activity-event activity-event-${event.type}`}>
       <span className="activity-event-icon">{getIcon()}</span>
       <span className="activity-event-message">{getMessage()}</span>
       <span className="activity-event-time">{formatTime(event.timestamp)}</span>
 
-      {event.type === 'tool_start' && event.toolArgs && (
+      {hasExpandableContent && (
         <>
           <button
             className="activity-event-args-toggle"
-            onClick={() => setShowArgs(!showArgs)}
-            aria-expanded={showArgs}
+            onClick={() => setShowDetails(!showDetails)}
+            aria-expanded={showDetails}
           >
-            {showArgs ? '−' : '+'}
+            {showDetails ? '−' : '+'}
           </button>
-          {showArgs && (
-            <pre className="activity-event-args">
-              {JSON.stringify(event.toolArgs, null, 2)}
-            </pre>
+          {showDetails && (
+            <div className="activity-event-args">
+              {/* Tool start: show arguments */}
+              {event.type === 'tool_start' && event.toolArgs && (
+                <ToolArgsDisplay args={event.toolArgs} />
+              )}
+              {/* Tool end: show result */}
+              {event.type === 'tool_end' && event.toolResult && (
+                <div className="activity-event-result">
+                  <div className="activity-event-result-label">Result:</div>
+                  <pre className="activity-event-result-text">{event.toolResult}</pre>
+                </div>
+              )}
+              {/* Thinking: show LLM reasoning */}
+              {event.type === 'thinking' && event.thinkingContent && (
+                <div className="activity-event-thinking">
+                  <pre className="activity-event-thinking-text">{event.thinkingContent}</pre>
+                </div>
+              )}
+            </div>
           )}
         </>
       )}

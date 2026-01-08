@@ -140,6 +140,7 @@ export interface GenerationStatus {
 export type GenerationEventType =
   | 'round_start'
   | 'generating'
+  | 'thinking'
   | 'tool_start'
   | 'tool_end'
   | 'complete'
@@ -151,6 +152,8 @@ export interface GenerationEvent {
   max_rounds?: number
   tool_name?: string
   tool_args?: Record<string, unknown>
+  tool_result?: string
+  content?: string  // For 'thinking' events
   session?: Session
   response?: ChatResponse
   queue_stats?: QueueStats
