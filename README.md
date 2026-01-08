@@ -105,6 +105,33 @@ Keep the model loaded and serve multiple agent profiles via HTTP:
 ./run-ping
 ```
 
+### Google Sync (Gmail + Calendar)
+
+The daemon syncs Gmail and Calendar for all authenticated accounts:
+- **On startup**: Syncs last year of data immediately
+- **Every 5 minutes**: Incremental sync
+
+**Quick setup:**
+
+```bash
+# 1. Store OAuth client secret in passveil (one-time)
+passveil set google/qwen-sync-oauth < ~/Downloads/client_secrets.json
+
+# 2. Authenticate each account
+python -m daemon.sync.auth --account work
+python -m daemon.sync.auth --account personal
+
+# 3. Start daemon - sync happens automatically
+./run-daemon
+```
+
+**See [docs/AUTH.md](docs/AUTH.md) for detailed setup instructions** including:
+- Creating OAuth credentials in Google Cloud Console
+- Supporting personal Gmail accounts (not just Workspace)
+- Troubleshooting token expiration
+
+**Data storage:** `~/.qwen/data/{account}/emails/` and `calendar/`
+
 ### Endpoints
 
 | Endpoint | Method | Description |

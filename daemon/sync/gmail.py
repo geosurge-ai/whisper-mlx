@@ -1,362 +1,329 @@
 """
-Gmail sync module.
+Gmail synchronization module.
 
-Fetches emails and attachments from Gmail API and stores them locally.
-Supports incremental sync using Gmail history API.
+Downloads emails with attachments for a specific account.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timedelta, timezone
-from email.utils import parseaddr, parsedate_to_datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from googleapiclient.discovery import build
 
 from .auth import get_google_credentials
 from .storage import (
-    get_sync_state,
-    save_sync_state,
-    save_email,
+    get_gmail_sync_state_file,
+    list_emails,
+    load_sync_state,
     save_attachment,
+    save_email,
+    save_sync_state,
 )
 
 logger = logging.getLogger("qwen.sync.gmail")
 
-# Default lookback period for initial sync
-DEFAULT_LOOKBACK_DAYS = 365
-
 
 class GmailSyncer:
-    """Syncs emails from Gmail to local storage."""
+    """Syncs Gmail messages for a specific account."""
 
-    def __init__(self, lookback_days: int = DEFAULT_LOOKBACK_DAYS):
+    def __init__(self, account: str, lookback_days: int = 365):
+        """
+        Initialize Gmail syncer.
+
+        Args:
+            account: Account name (matches credentials in ~/.qwen/accounts/{account}/)
+            lookback_days: How many days back to sync (default: 1 year)
+        """
+        self.account = account
         self.lookback_days = lookback_days
-        self._service = None
+        self.service = None
+        self._existing_ids: set[str] | None = None
 
     def _get_service(self) -> Any:
         """Get or create Gmail API service."""
-        if self._service is None:
-            creds = get_google_credentials()
+        if self.service is None:
+            creds = get_google_credentials(self.account)
             if creds is None:
                 raise RuntimeError(
-                    "Not authenticated with Google. Run: python -m daemon.sync.auth"
+                    f"No credentials for account '{self.account}'. "
+                    f"Run: python -m daemon.sync.auth --account {self.account}"
                 )
-            self._service = build("gmail", "v1", credentials=creds)
-        return self._service
+            self.service = build("gmail", "v1", credentials=creds)
+        return self.service
 
-    async def sync(self) -> dict[str, Any]:
-        """
-        Sync emails from Gmail.
+    def _get_existing_ids(self) -> set[str]:
+        """Get set of already-synced email IDs."""
+        if self._existing_ids is None:
+            self._existing_ids = set(list_emails(self.account))
+        return self._existing_ids
 
-        Returns dict with sync statistics.
-        """
-        logger.info("Starting Gmail sync...")
-
-        service = self._get_service()
-        state = get_sync_state("gmail")
-
-        # Determine sync strategy
-        if state["last_sync"] is None:
-            # First sync - fetch emails from lookback period
-            result = await self._full_sync(service, state)
-        else:
-            # Incremental sync using history API
-            result = await self._incremental_sync(service, state)
-
-        logger.info(
-            f"Gmail sync complete: {result['new_emails']} new, "
-            f"{result['attachments']} attachments"
-        )
-
+    def _parse_email_headers(self, headers: list[dict[str, str]]) -> dict[str, str]:
+        """Extract useful headers from email."""
+        result: dict[str, str] = {}
+        for header in headers:
+            name = header.get("name", "").lower()
+            value = header.get("value", "")
+            if name in ("from", "to", "cc", "bcc", "subject", "date", "message-id"):
+                result[name] = value
         return result
 
-    async def _full_sync(
-        self, service: Any, state: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Perform full sync from scratch."""
-        logger.info(f"Full Gmail sync (last {self.lookback_days} days)...")
+    def _extract_body(self, payload: dict[str, Any]) -> str:
+        """Extract email body text from payload."""
+        body = ""
 
-        # Calculate date range
-        after_date = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
-        query = f"after:{after_date.strftime('%Y/%m/%d')}"
+        if "body" in payload and payload["body"].get("data"):
+            try:
+                data = payload["body"]["data"]
+                body = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+            except Exception as e:
+                logger.warning(f"Failed to decode body: {e}")
 
-        new_emails = 0
-        attachments_count = 0
-        page_token = None
-        history_id = None
+        # Handle multipart messages
+        if "parts" in payload:
+            for part in payload["parts"]:
+                mime_type = part.get("mimeType", "")
+                if mime_type == "text/plain" and not body:
+                    if part.get("body", {}).get("data"):
+                        try:
+                            data = part["body"]["data"]
+                            body = base64.urlsafe_b64decode(data).decode(
+                                "utf-8", errors="replace"
+                            )
+                        except Exception:
+                            pass
+                elif mime_type == "text/html" and not body:
+                    if part.get("body", {}).get("data"):
+                        try:
+                            data = part["body"]["data"]
+                            body = base64.urlsafe_b64decode(data).decode(
+                                "utf-8", errors="replace"
+                            )
+                        except Exception:
+                            pass
+                # Recurse into nested parts
+                elif "parts" in part:
+                    nested_body = self._extract_body(part)
+                    if nested_body and not body:
+                        body = nested_body
 
-        while True:
-            # List messages
-            results = (
+        return body
+
+    def _download_attachments(
+        self, message_id: str, payload: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        """Download and save attachments from email."""
+        attachments: list[dict[str, str]] = []
+        service = self._get_service()
+
+        def process_parts(parts: list[dict[str, Any]]) -> None:
+            for part in parts:
+                filename = part.get("filename", "")
+                if filename and part.get("body", {}).get("attachmentId"):
+                    try:
+                        attachment_id = part["body"]["attachmentId"]
+                        attachment = (
+                            service.users()
+                            .messages()
+                            .attachments()
+                            .get(
+                                userId="me",
+                                messageId=message_id,
+                                id=attachment_id,
+                            )
+                            .execute()
+                        )
+
+                        data = base64.urlsafe_b64decode(attachment["data"])
+                        saved_path = save_attachment(
+                            self.account, message_id, filename, data
+                        )
+
+                        attachments.append(
+                            {
+                                "filename": filename,
+                                "path": str(saved_path),
+                                "size": len(data),
+                                "mime_type": part.get("mimeType", ""),
+                            }
+                        )
+                        logger.debug(f"Saved attachment: {filename}")
+
+                    except Exception as e:
+                        logger.warning(f"Failed to download attachment {filename}: {e}")
+
+                # Recurse into nested parts
+                if "parts" in part:
+                    process_parts(part["parts"])
+
+        if "parts" in payload:
+            process_parts(payload["parts"])
+
+        return attachments
+
+    def _process_message(self, message_id: str) -> dict[str, Any] | None:
+        """Fetch and process a single message."""
+        service = self._get_service()
+
+        try:
+            msg = (
                 service.users()
                 .messages()
-                .list(
-                    userId="me",
-                    q=query,
-                    pageToken=page_token,
-                    maxResults=100,
-                )
+                .get(userId="me", id=message_id, format="full")
                 .execute()
             )
 
-            messages = results.get("messages", [])
-            if not messages:
-                break
+            payload = msg.get("payload", {})
+            headers = self._parse_email_headers(payload.get("headers", []))
 
-            # Fetch and store each message
-            for msg_ref in messages:
-                msg_id = msg_ref["id"]
-                try:
-                    email_data, attach_count = await self._fetch_and_store_email(
-                        service, msg_id
-                    )
-                    new_emails += 1
-                    attachments_count += attach_count
+            # Extract body
+            body = self._extract_body(payload)
 
-                    # Track history ID for incremental sync
-                    if email_data.get("history_id"):
-                        if history_id is None or int(email_data["history_id"]) > int(
-                            history_id
-                        ):
-                            history_id = email_data["history_id"]
+            # Download attachments
+            attachments = self._download_attachments(message_id, payload)
 
-                except Exception as e:
-                    logger.warning(f"Failed to fetch email {msg_id}: {e}")
+            email_data = {
+                "id": message_id,
+                "thread_id": msg.get("threadId", ""),
+                "label_ids": msg.get("labelIds", []),
+                "snippet": msg.get("snippet", ""),
+                "internal_date": msg.get("internalDate", ""),
+                "headers": headers,
+                "from": headers.get("from", ""),
+                "to": headers.get("to", ""),
+                "cc": headers.get("cc", ""),
+                "subject": headers.get("subject", ""),
+                "date": headers.get("date", ""),
+                "body": body,
+                "attachments": attachments,
+                "has_attachments": len(attachments) > 0,
+                "synced_at": datetime.utcnow().isoformat(),
+            }
 
-            # Check for more pages
-            page_token = results.get("nextPageToken")
-            if not page_token:
-                break
+            return email_data
 
-            logger.info(f"Synced {new_emails} emails so far...")
+        except Exception as e:
+            logger.error(f"Failed to process message {message_id}: {e}")
+            return None
 
-        # Update state
-        state["last_history_id"] = history_id
-        state["email_count"] = state.get("email_count", 0) + new_emails
-        save_sync_state("gmail", state)
+    def sync(self, max_results: int | None = None) -> dict[str, Any]:
+        """
+        Sync emails from Gmail.
 
-        return {
-            "new_emails": new_emails,
-            "attachments": attachments_count,
-            "sync_type": "full",
+        Args:
+            max_results: Maximum number of emails to sync (None = no limit)
+
+        Returns:
+            Sync statistics
+        """
+        logger.info(f"Starting Gmail sync for account '{self.account}'...")
+        service = self._get_service()
+
+        # Load sync state
+        state_file = get_gmail_sync_state_file(self.account)
+        state = load_sync_state(state_file)
+
+        # Calculate date range
+        after_date = datetime.utcnow() - timedelta(days=self.lookback_days)
+        query = f"after:{after_date.strftime('%Y/%m/%d')}"
+
+        # Get existing email IDs
+        existing_ids = self._get_existing_ids()
+
+        stats = {
+            "account": self.account,
+            "new_emails": 0,
+            "skipped": 0,
+            "errors": 0,
+            "attachments": 0,
         }
 
-    async def _incremental_sync(
-        self, service: Any, state: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Perform incremental sync using history API."""
-        history_id = state.get("last_history_id")
-
-        if not history_id:
-            # Fall back to full sync
-            return await self._full_sync(service, state)
-
-        logger.info(f"Incremental Gmail sync from history {history_id}...")
-
-        new_emails = 0
-        attachments_count = 0
-        new_history_id = history_id
-
         try:
+            # List messages
             page_token = None
+            processed = 0
 
             while True:
-                # Get history changes
                 results = (
                     service.users()
-                    .history()
+                    .messages()
                     .list(
                         userId="me",
-                        startHistoryId=history_id,
-                        historyTypes=["messageAdded"],
+                        q=query,
                         pageToken=page_token,
+                        maxResults=100,
                     )
                     .execute()
                 )
 
-                # Update history ID
-                if "historyId" in results:
-                    new_history_id = results["historyId"]
+                messages = results.get("messages", [])
+                if not messages:
+                    break
 
-                history_records = results.get("history", [])
+                for msg_info in messages:
+                    msg_id = msg_info["id"]
 
-                for record in history_records:
-                    messages_added = record.get("messagesAdded", [])
-                    for msg_info in messages_added:
-                        msg_id = msg_info["message"]["id"]
-                        try:
-                            _, attach_count = await self._fetch_and_store_email(
-                                service, msg_id
+                    # Skip if already synced
+                    if msg_id in existing_ids:
+                        stats["skipped"] += 1
+                        continue
+
+                    # Process message
+                    email_data = self._process_message(msg_id)
+                    if email_data:
+                        save_email(self.account, email_data)
+                        existing_ids.add(msg_id)
+                        stats["new_emails"] += 1
+                        stats["attachments"] += len(email_data.get("attachments", []))
+
+                        if stats["new_emails"] % 10 == 0:
+                            logger.info(
+                                f"[{self.account}] Synced {stats['new_emails']} emails..."
                             )
-                            new_emails += 1
-                            attachments_count += attach_count
-                        except Exception as e:
-                            logger.warning(f"Failed to fetch email {msg_id}: {e}")
+                    else:
+                        stats["errors"] += 1
 
-                # Check for more pages
+                    processed += 1
+                    if max_results and processed >= max_results:
+                        break
+
+                if max_results and processed >= max_results:
+                    break
+
                 page_token = results.get("nextPageToken")
                 if not page_token:
                     break
 
         except Exception as e:
-            # History ID expired or invalid - fall back to full sync
-            if "notFound" in str(e) or "invalid" in str(e).lower():
-                logger.warning("History expired, falling back to full sync")
-                return await self._full_sync(service, state)
-            raise
+            logger.error(f"Gmail sync error for account '{self.account}': {e}")
+            stats["error_message"] = str(e)
 
-        # Update state
-        state["last_history_id"] = new_history_id
-        state["email_count"] = state.get("email_count", 0) + new_emails
-        save_sync_state("gmail", state)
+        # Save sync state
+        state["last_sync"] = datetime.utcnow().isoformat()
+        state["last_stats"] = stats
+        save_sync_state(state_file, state)
 
-        return {
-            "new_emails": new_emails,
-            "attachments": attachments_count,
-            "sync_type": "incremental",
-        }
-
-    async def _fetch_and_store_email(
-        self, service: Any, msg_id: str
-    ) -> tuple[dict[str, Any], int]:
-        """
-        Fetch a single email and store it with attachments.
-
-        Returns (email_data, attachment_count).
-        """
-        # Fetch full message
-        message = (
-            service.users()
-            .messages()
-            .get(userId="me", id=msg_id, format="full")
-            .execute()
+        logger.info(
+            f"[{self.account}] Gmail sync complete: "
+            f"{stats['new_emails']} new, {stats['skipped']} skipped, "
+            f"{stats['attachments']} attachments"
         )
 
-        # Parse headers
-        headers = {h["name"].lower(): h["value"] for h in message["payload"]["headers"]}
-
-        # Parse date
-        date_str = headers.get("date", "")
-        try:
-            date = parsedate_to_datetime(date_str)
-            date_iso = date.isoformat()
-        except Exception:
-            date_iso = None
-
-        # Parse from/to
-        from_addr = parseaddr(headers.get("from", ""))[1]
-        to_addrs = [
-            parseaddr(addr.strip())[1]
-            for addr in headers.get("to", "").split(",")
-            if addr.strip()
-        ]
-
-        # Extract body and attachments
-        body_text, body_html, attachments = self._extract_body_and_attachments(
-            service, msg_id, message["payload"]
-        )
-
-        # Build email data
-        email_data: dict[str, Any] = {
-            "id": msg_id,
-            "thread_id": message.get("threadId"),
-            "history_id": message.get("historyId"),
-            "from": from_addr,
-            "to": to_addrs,
-            "subject": headers.get("subject", ""),
-            "date": date_iso,
-            "labels": message.get("labelIds", []),
-            "snippet": message.get("snippet", ""),
-            "body_text": body_text,
-            "body_html": body_html,
-            "attachments": attachments,
-        }
-
-        # Save email
-        save_email(email_data)
-
-        return email_data, len(attachments)
-
-    def _extract_body_and_attachments(
-        self, service: Any, msg_id: str, payload: dict[str, Any]
-    ) -> tuple[str, str, list[dict[str, Any]]]:
-        """
-        Extract body text, HTML, and attachments from message payload.
-
-        Returns (body_text, body_html, attachments_list).
-        """
-        body_text = ""
-        body_html = ""
-        attachments: list[dict[str, Any]] = []
-
-        def process_part(part: dict[str, Any]) -> None:
-            nonlocal body_text, body_html
-
-            mime_type = part.get("mimeType", "")
-            body = part.get("body", {})
-            filename = part.get("filename", "")
-
-            # Handle nested parts
-            if "parts" in part:
-                for subpart in part["parts"]:
-                    process_part(subpart)
-                return
-
-            # Handle body content
-            if body.get("data"):
-                content = base64.urlsafe_b64decode(body["data"]).decode(
-                    "utf-8", errors="replace"
-                )
-                if mime_type == "text/plain" and not filename:
-                    body_text = content
-                elif mime_type == "text/html" and not filename:
-                    body_html = content
-
-            # Handle attachments
-            if filename and body.get("attachmentId"):
-                try:
-                    # Fetch attachment
-                    attachment = (
-                        service.users()
-                        .messages()
-                        .attachments()
-                        .get(
-                            userId="me",
-                            messageId=msg_id,
-                            id=body["attachmentId"],
-                        )
-                        .execute()
-                    )
-
-                    # Decode and save
-                    content = base64.urlsafe_b64decode(attachment["data"])
-                    path = save_attachment(msg_id, filename, content)
-
-                    attachments.append(
-                        {
-                            "filename": filename,
-                            "path": str(path.relative_to(path.parents[2])),
-                            "mime_type": mime_type,
-                            "size": len(content),
-                        }
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to fetch attachment {filename}: {e}")
-
-        process_part(payload)
-        return body_text, body_html, attachments
+        return stats
 
 
-# Singleton instance
-_gmail_syncer: GmailSyncer | None = None
+def sync_gmail(account: str, lookback_days: int = 365) -> dict[str, Any]:
+    """
+    Convenience function to sync Gmail for an account.
 
+    Args:
+        account: Account name
+        lookback_days: How many days back to sync
 
-def get_gmail_syncer() -> GmailSyncer:
-    """Get the Gmail syncer singleton."""
-    global _gmail_syncer
-    if _gmail_syncer is None:
-        _gmail_syncer = GmailSyncer()
-    return _gmail_syncer
+    Returns:
+        Sync statistics
+    """
+    syncer = GmailSyncer(account, lookback_days)
+    return syncer.sync()

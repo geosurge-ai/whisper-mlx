@@ -308,13 +308,13 @@ class AppState:
         with self._queue_lock:
             if session_id in self._position_map:
                 return self._position_map[session_id]
-            
+
             position = self._next_position
             self._next_position += 1
             self._position_map[session_id] = position
             if session_id not in self._queued_session_ids:
                 self._queued_session_ids.append(session_id)
-            
+
             logger.info(f"📥 Session {session_id[:8]} added to queue at position {position}")
             return position
 
@@ -367,36 +367,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("🚀 Qwen Daemon starting...")
     logger.info(f"   Available profiles: {list(ALL_PROFILES.keys())}")
     logger.info(f"   Available tools: {get_registry().available_tools}")
-    
+
     store = get_session_store()
     pruned = store.prune_empty(max_age_seconds=0)
     if pruned > 0:
         logger.info(f"   🗑️ Pruned {pruned} empty session(s) on startup")
-    
+
     logger.info("   Loading model (this may take 30-60 seconds)...")
     start_time = time.time()
     _ = app_state.get_chat_service(ModelSize.LARGE)
     elapsed = time.time() - start_time
     logger.info(f"   ✓ Model loaded and ready in {elapsed:.1f}s!")
-    
+
     # Start Google sync scheduler (runs every 5 minutes)
     try:
         from .sync.scheduler import start_scheduler
         start_scheduler()
     except Exception as e:
         logger.warning(f"Failed to start sync scheduler: {e}")
-    
+
     yield
-    
+
     logger.info("👋 Qwen Daemon shutting down...")
-    
+
     # Stop sync scheduler
     try:
         from .sync.scheduler import stop_scheduler
         stop_scheduler()
     except Exception as e:
         logger.warning(f"Error stopping sync scheduler: {e}")
-    
+
     try:
         from .tools.browser.manager import get_browser_manager
         browser_manager = get_browser_manager()
@@ -468,7 +468,7 @@ async def get_tool(tool_name: str) -> ToolInfo:
 async def invoke_tool_by_name(tool_name: str, request: ToolInvokeRequest) -> ToolInvokeResponse:
     """
     Invoke a specific tool directly (local-only API).
-    
+
     This endpoint allows direct tool execution without LLM involvement.
     Supports both sync and async tools.
     """
@@ -499,7 +499,7 @@ async def invoke_tool_by_name(tool_name: str, request: ToolInvokeRequest) -> Too
 async def invoke_tool_legacy(request: LegacyToolInvokeRequest) -> ToolInvokeResponse:
     """
     Legacy tool invocation endpoint (for backwards compatibility).
-    
+
     Use POST /v1/tools/{name}/invoke instead.
     """
     start_time = time.perf_counter()
@@ -745,7 +745,7 @@ async def session_chat(session_id: str, request: SessionChatRequest) -> SessionC
                 lock_acquired_time = time.perf_counter()
                 queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
                 was_queued = queue_wait_ms > 10
-                
+
                 logger.info(f"🔓 Session {session_id[:8]} acquired lock (waited {queue_wait_ms:.0f}ms)")
 
                 app_state.set_generating(True, session_id=session_id)
@@ -857,12 +857,12 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
         acquired_lock = False
         was_queued = False
         queue_wait_ms = 0.0
-        
+
         event_queue: asyncio.Queue[dict] = asyncio.Queue()
-        
+
         async def on_event(event: dict) -> None:
             await event_queue.put(event)
-        
+
         try:
             async with asyncio.timeout(1800):
                 async with app_state.generation_lock:
@@ -870,17 +870,17 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                     lock_acquired_time = time.perf_counter()
                     queue_wait_ms = (lock_acquired_time - queue_enter_time) * 1000
                     was_queued = queue_wait_ms > 10
-                    
+
                     app_state.set_generating(True, session_id=session_id)
-                    
+
                     try:
                         service = app_state.get_chat_service(model_size)
-                        
+
                         history: list[ChatMessage] = [
                             ChatMessage(msg.role, msg.content)
                             for msg in session.messages[:-1]
                         ]
-                        
+
                         async def run_chat():
                             context_token = set_session_context(session_id)
                             try:
@@ -893,31 +893,31 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                                 )
                             finally:
                                 reset_session_context(context_token)
-                        
+
                         chat_task = asyncio.create_task(run_chat())
-                        
+
                         while not chat_task.done():
                             try:
                                 event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                                 yield f"data: {json.dumps(event)}\n\n"
                             except asyncio.TimeoutError:
                                 continue
-                        
+
                         while not event_queue.empty():
                             event = event_queue.get_nowait()
                             yield f"data: {json.dumps(event)}\n\n"
-                        
+
                         result = await chat_task
-                        
+
                         session.add_message(
                             role="assistant",
                             content=result.content,
                             tool_calls=[{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
                             tool_results=[{"tool_name": tr.tool_name, "result": tr.result} for tr in result.tool_results],
                         )
-                        
+
                         store.save(session)
-                        
+
                         latency_ms = (time.perf_counter() - start_time) * 1000
                         complete_event = GenerationEvent(
                             type="complete",
@@ -937,11 +937,11 @@ async def session_chat_stream(session_id: str, request: SessionChatRequest):
                             ),
                         )
                         yield f"data: {complete_event.model_dump_json()}\n\n"
-                        
+
                     finally:
                         app_state.set_generating(False)
                         app_state.remove_from_queue(session_id)
-                        
+
         except asyncio.TimeoutError:
             if not acquired_lock:
                 app_state.remove_from_queue(session_id)

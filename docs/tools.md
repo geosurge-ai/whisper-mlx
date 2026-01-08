@@ -139,7 +139,7 @@ curl -X POST http://127.0.0.1:5997/v1/tools/ocr_document/invoke \
 
 ### Google Tools
 
-Gmail and Calendar search - syncs data automatically every 5 minutes.
+Gmail and Calendar search with **multi-account support** - syncs data automatically every 5 minutes.
 
 | Tool | Description |
 |------|-------------|
@@ -148,46 +148,64 @@ Gmail and Calendar search - syncs data automatically every 5 minutes.
 | `search_calendar` | Search calendar events by query, date range |
 | `get_calendar_event` | Get full event details by ID |
 
-**Setup:** Run once to authenticate with Google:
+**Setup:** Authenticate each Google account you want to sync:
 
 ```bash
-python -m daemon.sync.auth
+# Add accounts (run once per account)
+python -m daemon.sync.auth --account ep      # e.g., ep@memorici.de
+python -m daemon.sync.auth --account jm      # e.g., jm@memorici.de
+
+# List configured accounts
+python -m daemon.sync.auth --list
 ```
 
-This opens a browser for OAuth2 login. Credentials are stored in `~/.qwen/google_credentials.json`.
+This opens a browser for OAuth2 login. Credentials are stored in `~/.qwen/accounts/{account}/credentials.json`.
 
 **Example usage:**
 
 ```bash
-# Search emails
+# Search emails across ALL accounts
 curl -X POST http://127.0.0.1:5997/v1/tools/search_emails/invoke \
   -H "Content-Type: application/json" \
   -d '{"arguments": {"query": "project update", "limit": 10}}'
 
-# Search emails from a specific sender with attachments
+# Search emails from a SPECIFIC account
 curl -X POST http://127.0.0.1:5997/v1/tools/search_emails/invoke \
   -H "Content-Type: application/json" \
-  -d '{"arguments": {"from_email": "boss@company.com", "has_attachment": true}}'
+  -d '{"arguments": {"account": "ep", "from_email": "boss@company.com", "has_attachments": true}}'
 
-# Get today's calendar events
+# Search calendar events across all accounts
 curl -X POST http://127.0.0.1:5997/v1/tools/search_calendar/invoke \
   -H "Content-Type: application/json" \
-  -d '{"arguments": {"date_range": "today"}}'
+  -d '{"arguments": {"query": "standup"}}'
 
-# Get this week's events
+# Search calendar events for specific account
 curl -X POST http://127.0.0.1:5997/v1/tools/search_calendar/invoke \
   -H "Content-Type: application/json" \
-  -d '{"arguments": {"date_range": "this_week"}}'
+  -d '{"arguments": {"account": "jm", "after_date": "2024-01-01"}}'
 ```
 
-**Storage:** Data is synced to `~/.qwen/data/`:
-- `gmail/emails/*.json` - Email messages
-- `gmail/attachments/` - Email attachments
-- `calendar/events/*.json` - Calendar events
+**Storage:** Data is synced to `~/.qwen/data/{account}/`:
+
+```
+~/.qwen/
+  accounts/
+    ep/credentials.json
+    jm/credentials.json
+  data/
+    ep/
+      gmail/emails/*.json
+      gmail/attachments/{msg_id}/
+      calendar/events/*.json
+    jm/
+      gmail/...
+      calendar/...
+```
 
 **Configuration:**
-- `QWEN_SYNC_INTERVAL` - Sync interval in seconds (default: 300)
+- Sync interval: 5 minutes (constant)
 - Initial sync fetches 1 year of history
+- All accounts sync automatically when daemon starts
 
 ## Creating Custom Tools
 

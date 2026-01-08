@@ -1,7 +1,7 @@
 """
 Get calendar event tool.
 
-Retrieves full details of a specific calendar event by ID.
+Retrieve full details of a downloaded calendar event by ID.
 """
 
 from __future__ import annotations
@@ -10,49 +10,117 @@ import json
 import logging
 from typing import Any
 
+from daemon.sync.storage import list_all_accounts_with_data, load_event
+
 from ..base import tool
-from ...sync.storage import load_calendar_event
 
 logger = logging.getLogger("qwen.tools.google")
 
 
 @tool(
     name="get_calendar_event",
-    description="""Get full details of a specific calendar event by ID.
+    description="""Retrieve full details of a downloaded calendar event by its ID.
 
-Use this after search_calendar to get complete event details including:
-- Full description
-- All attendees
-- Organizer information
-- Recurrence information
-- Links
-
-The event_id comes from search_calendar results.""",
+Returns complete event information including description, attendees, and conference details.
+Use search_calendar first to find event IDs.""",
     parameters={
         "type": "object",
         "properties": {
             "event_id": {
                 "type": "string",
-                "description": "The event ID from search_calendar results",
+                "description": "The event ID (from search_calendar results)",
+            },
+            "account": {
+                "type": "string",
+                "description": "Account name where the event is stored. If not specified, searches all accounts.",
             },
         },
         "required": ["event_id"],
     },
 )
-def get_calendar_event(event_id: str) -> str:
-    """Get full details of a specific calendar event."""
-    event = load_calendar_event(event_id)
-    
-    if event is None:
+def get_calendar_event(
+    event_id: str,
+    account: str | None = None,
+) -> str:
+    """Get full calendar event details by ID."""
+    logger.info(f"Getting calendar event: id={event_id}, account={account}")
+
+    # If account specified, load directly
+    if account:
+        event = load_event(account, event_id)
+        if event:
+            return json.dumps({
+                "status": "success",
+                "event": _format_event(event),
+            })
         return json.dumps({
             "status": "error",
-            "error": f"Event not found: {event_id}",
+            "error": f"Event {event_id} not found in account '{account}'",
         })
-    
+
+    # Search across all accounts
+    accounts = list_all_accounts_with_data()
+    for acc in accounts:
+        event = load_event(acc, event_id)
+        if event:
+            return json.dumps({
+                "status": "success",
+                "event": _format_event(event),
+            })
+
     return json.dumps({
-        "status": "success",
-        "event": event,
+        "status": "error",
+        "error": f"Event {event_id} not found in any account",
     })
+
+
+def _format_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Format event for response."""
+    # Format attendees
+    attendees = []
+    for att in event.get("attendees", []):
+        attendees.append({
+            "email": att.get("email", ""),
+            "name": att.get("display_name", ""),
+            "response": att.get("response_status", ""),
+            "organizer": att.get("organizer", False),
+        })
+
+    # Extract conference info
+    conference = {}
+    conf_data = event.get("conference_data", {})
+    if conf_data:
+        entry_points = conf_data.get("entryPoints", [])
+        for ep in entry_points:
+            if ep.get("entryPointType") == "video":
+                conference["video_url"] = ep.get("uri", "")
+            elif ep.get("entryPointType") == "phone":
+                conference["phone"] = ep.get("uri", "")
+
+    return {
+        "id": event.get("id", ""),
+        "account": event.get("account", ""),
+        "calendar_id": event.get("calendar_id", ""),
+        "calendar_name": event.get("calendar_name", ""),
+        "summary": event.get("summary", ""),
+        "description": event.get("description", ""),
+        "location": event.get("location", ""),
+        "start": event.get("start", ""),
+        "end": event.get("end", ""),
+        "all_day": event.get("all_day", False),
+        "timezone": event.get("timezone", ""),
+        "status": event.get("status", ""),
+        "html_link": event.get("html_link", ""),
+        "organizer": event.get("organizer", {}),
+        "creator": event.get("creator", {}),
+        "attendees": attendees,
+        "conference": conference,
+        "recurring_event_id": event.get("recurring_event_id", ""),
+        "reminders": event.get("reminders", {}),
+        "created": event.get("created", ""),
+        "updated": event.get("updated", ""),
+        "synced_at": event.get("synced_at", ""),
+    }
 
 
 TOOL = get_calendar_event

@@ -78,3 +78,15 @@ notes/
 !requirements.txt
 # Runtime data
 data/
+
+# --- Google OAuth / Credentials ---
+# NEVER commit these! They contain secrets.
+client_secrets.json
+client_secret*.json
+credentials.json
+*_credentials.json
+token.json
+*.token
+
+# QweN data directory (should be in ~/.qwen/, but just in case)
+.qwen/

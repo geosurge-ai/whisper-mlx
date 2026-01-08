@@ -1,189 +1,250 @@
 """
 Background scheduler for Google sync.
 
-Runs Gmail and Calendar sync on a configurable interval.
-Integrates with the daemon lifespan.
+Runs continuous sync for all configured accounts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from datetime import datetime, timezone
+import threading
+from datetime import datetime
 from typing import Any
 
-from .auth import is_authenticated
-from .gmail import get_gmail_syncer
-from .calendar import get_calendar_syncer
-from .storage import get_storage_stats
+from .auth import list_accounts
+from .calendar import sync_calendar
+from .gmail import sync_gmail
 
 logger = logging.getLogger("qwen.sync.scheduler")
 
-# Default sync interval in seconds (5 minutes)
-DEFAULT_SYNC_INTERVAL = 300
+# Configuration
+SYNC_INTERVAL_SECONDS = 5 * 60  # 5 minutes
+LOOKBACK_DAYS = 365  # 1 year
 
-# Environment variable to configure sync interval
-SYNC_INTERVAL_ENV = "QWEN_SYNC_INTERVAL"
+# Global state
+_shutdown_event: asyncio.Event | None = None
+_scheduler_task: asyncio.Task[None] | None = None
+_scheduler_thread: threading.Thread | None = None
 
 
-def get_sync_interval() -> int:
-    """Get sync interval from environment or default."""
+async def sync_account(account: str) -> dict[str, Any]:
+    """
+    Sync Gmail and Calendar for a single account.
+
+    Runs synchronous sync operations in a thread pool.
+    """
+    logger.info(f"[Scheduler] Starting sync for account: {account}")
+
+    results: dict[str, Any] = {
+        "account": account,
+        "started_at": datetime.utcnow().isoformat(),
+    }
+
+    loop = asyncio.get_event_loop()
+
+    # Sync Gmail
     try:
-        return int(os.environ.get(SYNC_INTERVAL_ENV, DEFAULT_SYNC_INTERVAL))
-    except ValueError:
-        return DEFAULT_SYNC_INTERVAL
-
-
-class SyncScheduler:
-    """Background scheduler for Google sync."""
-
-    def __init__(self, interval_seconds: int | None = None):
-        self.interval = interval_seconds or get_sync_interval()
-        self._task: asyncio.Task[None] | None = None
-        self._running = False
-        self._last_sync: datetime | None = None
-        self._last_result: dict[str, Any] | None = None
-
-    @property
-    def is_running(self) -> bool:
-        """Check if scheduler is running."""
-        return self._running
-
-    @property
-    def last_sync(self) -> datetime | None:
-        """Get timestamp of last successful sync."""
-        return self._last_sync
-
-    @property
-    def last_result(self) -> dict[str, Any] | None:
-        """Get result of last sync."""
-        return self._last_result
-
-    def start(self) -> None:
-        """Start the background sync scheduler."""
-        if self._running:
-            logger.warning("Sync scheduler already running")
-            return
-
-        if not is_authenticated():
-            logger.warning(
-                "Google not authenticated - sync scheduler disabled. "
-                "Run: python -m daemon.sync.auth"
-            )
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        logger.info(
-            f"📧 Sync scheduler started (interval: {self.interval}s)"
+        gmail_stats = await loop.run_in_executor(
+            None, lambda: sync_gmail(account, lookback_days=LOOKBACK_DAYS)
         )
+        results["gmail"] = gmail_stats
+        logger.info(
+            f"[{account}] Gmail: {gmail_stats.get('new_emails', 0)} new, "
+            f"{gmail_stats.get('attachments', 0)} attachments"
+        )
+    except Exception as e:
+        logger.error(f"[{account}] Gmail sync failed: {e}")
+        results["gmail_error"] = str(e)
 
-    def stop(self) -> None:
-        """Stop the background sync scheduler."""
-        if not self._running:
-            return
+    # Sync Calendar
+    try:
+        calendar_stats = await loop.run_in_executor(
+            None, lambda: sync_calendar(account, lookback_days=LOOKBACK_DAYS)
+        )
+        results["calendar"] = calendar_stats
+        logger.info(
+            f"[{account}] Calendar: {calendar_stats.get('new_events', 0)} new "
+            f"from {calendar_stats.get('calendars_synced', 0)} calendars"
+        )
+    except Exception as e:
+        logger.error(f"[{account}] Calendar sync failed: {e}")
+        results["calendar_error"] = str(e)
 
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            self._task = None
+    results["completed_at"] = datetime.utcnow().isoformat()
+    return results
 
-        logger.info("Sync scheduler stopped")
 
-    async def _run_loop(self) -> None:
-        """Main scheduler loop."""
-        # Run initial sync immediately
-        await self._run_sync()
+async def sync_all_accounts() -> list[dict[str, Any]]:
+    """Sync all configured accounts sequentially."""
+    accounts = list_accounts()
 
-        while self._running:
+    if not accounts:
+        logger.debug("[Scheduler] No accounts configured, skipping sync")
+        return []
+
+    logger.info(f"[Scheduler] Syncing {len(accounts)} account(s): {', '.join(accounts)}")
+
+    results = []
+    for account in accounts:
+        try:
+            result = await sync_account(account)
+            results.append(result)
+        except Exception as e:
+            logger.error(f"[Scheduler] Account {account} sync failed: {e}")
+            results.append({
+                "account": account,
+                "error": str(e),
+            })
+
+    return results
+
+
+async def start_sync_scheduler() -> None:
+    """
+    Start the background sync scheduler.
+
+    Runs forever until stop_sync_scheduler is called.
+    """
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+
+    logger.info(
+        f"[Scheduler] Started. Sync interval: {SYNC_INTERVAL_SECONDS}s, "
+        f"Lookback: {LOOKBACK_DAYS} days"
+    )
+
+    # Initial sync on startup
+    try:
+        await sync_all_accounts()
+    except Exception as e:
+        logger.error(f"[Scheduler] Initial sync failed: {e}")
+
+    # Continuous sync loop
+    while not _shutdown_event.is_set():
+        try:
+            # Wait for interval or shutdown
             try:
-                await asyncio.sleep(self.interval)
-                if self._running:
-                    await self._run_sync()
-            except asyncio.CancelledError:
+                await asyncio.wait_for(
+                    _shutdown_event.wait(),
+                    timeout=SYNC_INTERVAL_SECONDS,
+                )
+                # If we get here, shutdown was requested
                 break
-            except Exception as e:
-                logger.error(f"Scheduler error: {e}")
-                # Continue running, will retry on next interval
+            except asyncio.TimeoutError:
+                # Normal timeout, proceed with sync
+                pass
 
-    async def _run_sync(self) -> None:
-        """Run a single sync cycle."""
-        logger.info("Starting sync cycle...")
-        start_time = datetime.now(timezone.utc)
+            # Run sync
+            await sync_all_accounts()
 
-        gmail_result: dict[str, Any] = {"error": None}
-        calendar_result: dict[str, Any] = {"error": None}
-
-        # Sync Gmail
-        try:
-            gmail_syncer = get_gmail_syncer()
-            gmail_result = await gmail_syncer.sync()
         except Exception as e:
-            logger.error(f"Gmail sync failed: {e}")
-            gmail_result = {"error": str(e)}
+            logger.error(f"[Scheduler] Sync cycle failed: {e}")
 
-        # Sync Calendar
+    logger.info("[Scheduler] Stopped")
+
+
+def stop_sync_scheduler(task: asyncio.Task[None]) -> None:
+    """
+    Stop the background sync scheduler.
+
+    Args:
+        task: The task returned by asyncio.create_task(start_sync_scheduler())
+    """
+    global _shutdown_event
+
+    if _shutdown_event:
+        _shutdown_event.set()
+
+    if task and not task.done():
+        task.cancel()
         try:
-            calendar_syncer = get_calendar_syncer()
-            calendar_result = await calendar_syncer.sync()
+            # Give it a moment to clean up
+            pass
+        except Exception:
+            pass
+
+
+async def run_manual_sync(accounts: list[str] | None = None) -> list[dict[str, Any]]:
+    """
+    Run a manual sync for specific accounts or all accounts.
+
+    Args:
+        accounts: List of account names to sync, or None for all
+
+    Returns:
+        List of sync results
+    """
+    if accounts is None:
+        return await sync_all_accounts()
+
+    results = []
+    for account in accounts:
+        try:
+            result = await sync_account(account)
+            results.append(result)
         except Exception as e:
-            logger.error(f"Calendar sync failed: {e}")
-            calendar_result = {"error": str(e)}
+            logger.error(f"Manual sync failed for {account}: {e}")
+            results.append({
+                "account": account,
+                "error": str(e),
+            })
 
-        # Update state
-        self._last_sync = datetime.now(timezone.utc)
-        self._last_result = {
-            "gmail": gmail_result,
-            "calendar": calendar_result,
-            "duration_seconds": (self._last_sync - start_time).total_seconds(),
-            "storage": get_storage_stats(),
-        }
-
-        # Log summary
-        duration = self._last_result["duration_seconds"]
-        stats = self._last_result["storage"]
-        logger.info(
-            f"Sync cycle complete in {duration:.1f}s - "
-            f"{stats['email_count']} emails, {stats['event_count']} events, "
-            f"{stats['total_size_mb']}MB"
-        )
-
-    async def run_sync_now(self) -> dict[str, Any]:
-        """Trigger an immediate sync (for manual use)."""
-        await self._run_sync()
-        return self._last_result or {}
-
-    def get_status(self) -> dict[str, Any]:
-        """Get current scheduler status."""
-        return {
-            "running": self._running,
-            "interval_seconds": self.interval,
-            "last_sync": self._last_sync.isoformat() if self._last_sync else None,
-            "last_result": self._last_result,
-            "authenticated": is_authenticated(),
-        }
+    return results
 
 
-# Singleton instance
-_scheduler: SyncScheduler | None = None
-
-
-def get_scheduler() -> SyncScheduler:
-    """Get the sync scheduler singleton."""
-    global _scheduler
-    if _scheduler is None:
-        _scheduler = SyncScheduler()
-    return _scheduler
+def _run_scheduler_in_thread() -> None:
+    """Run the async scheduler in a dedicated thread with its own event loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(start_sync_scheduler())
+    except Exception as e:
+        logger.error(f"Scheduler thread error: {e}")
+    finally:
+        loop.close()
 
 
 def start_scheduler() -> None:
-    """Start the background sync scheduler."""
-    get_scheduler().start()
+    """
+    Start the Google sync scheduler in a background thread.
+
+    This is the main entry point called by the daemon server.
+    Runs the async scheduler in a separate thread so it doesn't block.
+    """
+    global _scheduler_thread
+
+    accounts = list_accounts()
+    if not accounts:
+        logger.info("[Scheduler] No Google accounts configured. Skipping sync.")
+        logger.info("[Scheduler] To add an account: python -m daemon.sync.auth --account NAME")
+        return
+
+    logger.info(f"[Scheduler] Starting background sync for {len(accounts)} account(s)")
+    logger.info(f"[Scheduler] Accounts: {', '.join(accounts)}")
+    logger.info(f"[Scheduler] Sync interval: {SYNC_INTERVAL_SECONDS}s, Lookback: {LOOKBACK_DAYS} days")
+
+    _scheduler_thread = threading.Thread(
+        target=_run_scheduler_in_thread,
+        name="google-sync-scheduler",
+        daemon=True,  # Dies when main thread exits
+    )
+    _scheduler_thread.start()
 
 
 def stop_scheduler() -> None:
-    """Stop the background sync scheduler."""
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.stop()
+    """
+    Stop the Google sync scheduler.
+
+    Called during daemon shutdown.
+    """
+    global _shutdown_event, _scheduler_thread
+
+    if _shutdown_event:
+        _shutdown_event.set()
+        logger.info("[Scheduler] Shutdown signal sent")
+
+    if _scheduler_thread and _scheduler_thread.is_alive():
+        _scheduler_thread.join(timeout=5)
+        if _scheduler_thread.is_alive():
+            logger.warning("[Scheduler] Thread did not stop gracefully")

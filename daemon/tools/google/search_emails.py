@@ -1,7 +1,7 @@
 """
 Search emails tool.
 
-Searches through synced Gmail messages.
+Search locally synced emails by various criteria.
 """
 
 from __future__ import annotations
@@ -10,125 +10,154 @@ import json
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
+from daemon.sync.storage import load_all_emails
+
 from ..base import tool
-from ...sync.storage import get_gmail_emails_dir, list_emails
 
 logger = logging.getLogger("qwen.tools.google")
 
 
-def _parse_date(date_str: str | None) -> datetime | None:
-    """Parse ISO date string to datetime."""
-    if not date_str:
-        return None
-    try:
-        # Handle various ISO formats
-        if date_str.endswith("Z"):
-            date_str = date_str[:-1] + "+00:00"
-        return datetime.fromisoformat(date_str)
-    except (ValueError, TypeError):
-        return None
-
-
-def _matches_query(email: dict[str, Any], query: str) -> bool:
-    """Check if email matches text query."""
-    query_lower = query.lower()
-    
-    # Search in subject, body, from, and snippet
-    searchable = [
-        email.get("subject", ""),
-        email.get("body_text", ""),
-        email.get("from", ""),
-        email.get("snippet", ""),
+def _parse_date(date_str: str) -> datetime | None:
+    """Try to parse a date string in various formats."""
+    formats = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
     ]
-    
-    for field in searchable:
-        if query_lower in field.lower():
-            return True
-    
-    return False
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
 
 
-def _matches_from(email: dict[str, Any], from_email: str) -> bool:
-    """Check if email is from specified address."""
-    email_from = email.get("from", "").lower()
-    return from_email.lower() in email_from
-
-
-def _matches_subject(email: dict[str, Any], subject: str) -> bool:
-    """Check if email subject contains text."""
-    email_subject = email.get("subject", "").lower()
-    return subject.lower() in email_subject
-
-
-def _in_date_range(
+def _email_matches_criteria(
     email: dict[str, Any],
-    after: str | None,
-    before: str | None,
+    from_email: str | None,
+    to_email: str | None,
+    subject: str | None,
+    query: str | None,
+    after_date: str | None,
+    before_date: str | None,
+    has_attachments: bool | None,
+    account: str | None,
 ) -> bool:
-    """Check if email is within date range."""
-    email_date = _parse_date(email.get("date"))
-    if not email_date:
-        return True  # Include emails without dates
-    
-    if after:
-        after_date = _parse_date(after)
-        if after_date and email_date < after_date:
+    """Check if an email matches the search criteria."""
+    # Account filter
+    if account and email.get("account", "") != account:
+        return False
+
+    # From filter (partial match)
+    if from_email:
+        email_from = email.get("from", "").lower()
+        if from_email.lower() not in email_from:
             return False
-    
-    if before:
-        before_date = _parse_date(before)
-        if before_date and email_date > before_date:
+
+    # To filter (partial match)
+    if to_email:
+        email_to = email.get("to", "").lower()
+        email_cc = email.get("cc", "").lower()
+        if to_email.lower() not in email_to and to_email.lower() not in email_cc:
             return False
-    
+
+    # Subject filter (partial match, case insensitive)
+    if subject:
+        email_subject = email.get("subject", "").lower()
+        if subject.lower() not in email_subject:
+            return False
+
+    # Full-text query (searches subject, body, snippet)
+    if query:
+        query_lower = query.lower()
+        searchable = " ".join([
+            email.get("subject", ""),
+            email.get("body", ""),
+            email.get("snippet", ""),
+        ]).lower()
+        # Simple word matching
+        if not re.search(re.escape(query_lower), searchable):
+            return False
+
+    # Date filters
+    email_date_str = email.get("date", "")
+    if email_date_str and (after_date or before_date):
+        # Try to parse email date
+        email_date = None
+        # Gmail dates are often in RFC 2822 format
+        try:
+            from email.utils import parsedate_to_datetime
+            email_date = parsedate_to_datetime(email_date_str)
+        except Exception:
+            pass
+
+        if email_date:
+            if after_date:
+                after = _parse_date(after_date)
+                if after and email_date.replace(tzinfo=None) < after:
+                    return False
+
+            if before_date:
+                before = _parse_date(before_date)
+                if before and email_date.replace(tzinfo=None) > before:
+                    return False
+
+    # Attachment filter
+    if has_attachments is not None:
+        has_att = email.get("has_attachments", False)
+        if has_attachments and not has_att:
+            return False
+        if not has_attachments and has_att:
+            return False
+
     return True
-
-
-def _has_attachments(email: dict[str, Any]) -> bool:
-    """Check if email has attachments."""
-    return len(email.get("attachments", [])) > 0
 
 
 @tool(
     name="search_emails",
-    description="""Search through synced Gmail messages.
+    description="""Search downloaded emails by various criteria.
 
-Use this tool to find emails by:
-- Text search (subject, body, sender)
-- Sender email address
-- Subject line
-- Date range
-- Attachments
+Searches across all synced Gmail accounts unless a specific account is specified.
+Returns matching emails with metadata and snippets.
 
-Returns a list of matching emails with snippets. Use get_email to get full content.""",
+Use this to find emails by sender, recipient, subject, content, or date range.""",
     parameters={
         "type": "object",
         "properties": {
-            "query": {
+            "account": {
                 "type": "string",
-                "description": "Text to search for in subject, body, and sender",
+                "description": "Account name to search (e.g., 'ep', 'jm'). If not specified, searches all accounts.",
             },
             "from_email": {
                 "type": "string",
-                "description": "Filter by sender email address (partial match)",
+                "description": "Filter by sender email or name (partial match)",
+            },
+            "to_email": {
+                "type": "string",
+                "description": "Filter by recipient email (partial match, includes CC)",
             },
             "subject": {
                 "type": "string",
-                "description": "Filter by subject line (partial match)",
+                "description": "Filter by subject (partial match)",
             },
-            "after": {
+            "query": {
                 "type": "string",
-                "description": "Only emails after this date (ISO format: 2024-01-15)",
+                "description": "Full-text search in subject, body, and snippet",
             },
-            "before": {
+            "after_date": {
                 "type": "string",
-                "description": "Only emails before this date (ISO format: 2024-01-15)",
+                "description": "Only emails after this date (YYYY-MM-DD)",
             },
-            "has_attachment": {
+            "before_date": {
+                "type": "string",
+                "description": "Only emails before this date (YYYY-MM-DD)",
+            },
+            "has_attachments": {
                 "type": "boolean",
-                "description": "If true, only return emails with attachments",
+                "description": "Filter by attachment presence",
             },
             "limit": {
                 "type": "integer",
@@ -139,73 +168,68 @@ Returns a list of matching emails with snippets. Use get_email to get full conte
     },
 )
 def search_emails(
-    query: str = "",
-    from_email: str = "",
-    subject: str = "",
-    after: str = "",
-    before: str = "",
-    has_attachment: bool = False,
+    account: str | None = None,
+    from_email: str | None = None,
+    to_email: str | None = None,
+    subject: str | None = None,
+    query: str | None = None,
+    after_date: str | None = None,
+    before_date: str | None = None,
+    has_attachments: bool | None = None,
     limit: int = 20,
 ) -> str:
-    """Search through synced Gmail messages."""
-    emails_dir = get_gmail_emails_dir()
-    email_files = list_emails()
-    
-    if not email_files:
+    """Search downloaded emails."""
+    logger.info(f"Searching emails: account={account}, from={from_email}, subject={subject}, query={query}")
+
+    # Load all emails (optionally filtered by account)
+    all_emails = load_all_emails(account)
+
+    if not all_emails:
         return json.dumps({
             "status": "success",
-            "message": "No emails synced yet. Sync will run automatically.",
+            "count": 0,
+            "message": "No emails found. Emails may not be synced yet.",
             "results": [],
-            "total": 0,
         })
-    
-    results: list[dict[str, Any]] = []
-    
-    for email_file in email_files:
-        try:
-            with open(email_file) as f:
-                email = json.load(f)
-            
-            # Apply filters
-            if query and not _matches_query(email, query):
-                continue
-            if from_email and not _matches_from(email, from_email):
-                continue
-            if subject and not _matches_subject(email, subject):
-                continue
-            if not _in_date_range(email, after or None, before or None):
-                continue
-            if has_attachment and not _has_attachments(email):
-                continue
-            
-            # Build result summary
-            results.append({
-                "id": email["id"],
+
+    # Filter emails
+    matching: list[dict[str, Any]] = []
+    for email in all_emails:
+        if _email_matches_criteria(
+            email,
+            from_email,
+            to_email,
+            subject,
+            query,
+            after_date,
+            before_date,
+            has_attachments,
+            account,
+        ):
+            # Create summary for results
+            matching.append({
+                "id": email.get("id", ""),
+                "account": email.get("account", ""),
                 "from": email.get("from", ""),
-                "to": email.get("to", []),
-                "subject": email.get("subject", "(No subject)"),
+                "to": email.get("to", ""),
+                "subject": email.get("subject", ""),
                 "date": email.get("date", ""),
                 "snippet": email.get("snippet", "")[:200],
-                "has_attachments": _has_attachments(email),
+                "has_attachments": email.get("has_attachments", False),
                 "attachment_count": len(email.get("attachments", [])),
-                "labels": email.get("labels", []),
             })
-            
-            if len(results) >= limit:
-                break
-                
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to read email {email_file}: {e}")
-            continue
-    
+
     # Sort by date (newest first)
-    results.sort(key=lambda x: x.get("date", ""), reverse=True)
-    
+    matching.sort(key=lambda x: x.get("date", ""), reverse=True)
+
+    # Apply limit
+    results = matching[:limit]
+
     return json.dumps({
         "status": "success",
+        "count": len(results),
+        "total_matches": len(matching),
         "results": results,
-        "total": len(results),
-        "limit": limit,
     })
 
 

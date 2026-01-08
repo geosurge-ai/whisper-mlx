@@ -34,7 +34,9 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
-        self._lazy_loaders: dict[str, tuple[str, str]] = {}  # name -> (module_path, attr)
+        self._lazy_loaders: dict[str, tuple[str, str]] = (
+            {}
+        )  # name -> (module_path, attr)
 
     def register(self, tool: Tool) -> None:
         """Register a tool directly."""
@@ -58,6 +60,7 @@ class ToolRegistry:
         module_path, attr = self._lazy_loaders[name]
         try:
             import importlib
+
             module = importlib.import_module(module_path)
             tool = getattr(module, attr)
             if isinstance(tool, Tool):
@@ -66,7 +69,9 @@ class ToolRegistry:
                 logger.debug(f"Lazy-loaded tool: {name}")
                 return tool
             else:
-                logger.error(f"Tool {name} at {module_path}.{attr} is not a Tool instance")
+                logger.error(
+                    f"Tool {name} at {module_path}.{attr} is not a Tool instance"
+                )
                 return None
         except Exception as e:
             logger.error(f"Failed to load tool {name}: {e}")
@@ -99,7 +104,9 @@ class ToolRegistry:
             # If accidentally called on async tool, handle gracefully
             if inspect.iscoroutine(result):
                 result.close()  # Prevent "coroutine never awaited" warning
-                return json.dumps({"error": f"Tool {name} is async, use execute_async()"})
+                return json.dumps(
+                    {"error": f"Tool {name} is async, use execute_async()"}
+                )
             return result  # type: ignore
         except Exception as e:
             logger.exception(f"Tool {name} execution failed")

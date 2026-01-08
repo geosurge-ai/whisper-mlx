@@ -1,269 +1,300 @@
 """
-Storage helpers for Google sync data.
+Local storage management for synced Google data.
 
-Data is stored in ~/.qwen/data/:
-- gmail/emails/*.json - Email messages
-- gmail/attachments/*/* - Email attachments
-- gmail/sync_state.json - Gmail sync state
-- calendar/events/*.json - Calendar events
-- calendar/sync_state.json - Calendar sync state
+Supports multiple accounts with separate storage directories.
+
+Storage structure:
+    ~/.qwen/data/{account}/gmail/
+        emails/*.json          - Individual email files
+        attachments/{msg_id}/  - Email attachments
+        sync_state.json        - Sync progress state
+    ~/.qwen/data/{account}/calendar/
+        events/*.json          - Individual event files
+        sync_state.json        - Sync progress state
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("qwen.sync.storage")
 
-# Base data directory
+# Base directories
 QWEN_DIR = Path.home() / ".qwen"
 DATA_DIR = QWEN_DIR / "data"
 
 
 def get_data_dir() -> Path:
-    """Get the data directory, creating it if needed."""
+    """Get the base data directory."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR
 
 
-def get_gmail_dir() -> Path:
-    """Get the Gmail data directory."""
-    gmail_dir = get_data_dir() / "gmail"
+def get_account_data_dir(account: str) -> Path:
+    """Get data directory for a specific account."""
+    account_dir = get_data_dir() / account
+    account_dir.mkdir(parents=True, exist_ok=True)
+    return account_dir
+
+
+# Gmail storage
+def get_gmail_dir(account: str) -> Path:
+    """Get Gmail data directory for an account."""
+    gmail_dir = get_account_data_dir(account) / "gmail"
     gmail_dir.mkdir(parents=True, exist_ok=True)
     return gmail_dir
 
 
-def get_gmail_emails_dir() -> Path:
-    """Get the Gmail emails directory."""
-    emails_dir = get_gmail_dir() / "emails"
+def get_emails_dir(account: str) -> Path:
+    """Get emails directory for an account."""
+    emails_dir = get_gmail_dir(account) / "emails"
     emails_dir.mkdir(parents=True, exist_ok=True)
     return emails_dir
 
 
-def get_gmail_attachments_dir() -> Path:
-    """Get the Gmail attachments directory."""
-    attachments_dir = get_gmail_dir() / "attachments"
+def get_attachments_dir(account: str, message_id: str | None = None) -> Path:
+    """Get attachments directory, optionally for a specific message."""
+    attachments_dir = get_gmail_dir(account) / "attachments"
+    if message_id:
+        attachments_dir = attachments_dir / message_id
     attachments_dir.mkdir(parents=True, exist_ok=True)
     return attachments_dir
 
 
-def get_calendar_dir() -> Path:
-    """Get the Calendar data directory."""
-    calendar_dir = get_data_dir() / "calendar"
+def get_gmail_sync_state_file(account: str) -> Path:
+    """Get Gmail sync state file path."""
+    return get_gmail_dir(account) / "sync_state.json"
+
+
+# Calendar storage
+def get_calendar_dir(account: str) -> Path:
+    """Get Calendar data directory for an account."""
+    calendar_dir = get_account_data_dir(account) / "calendar"
     calendar_dir.mkdir(parents=True, exist_ok=True)
     return calendar_dir
 
 
-def get_calendar_events_dir() -> Path:
-    """Get the Calendar events directory."""
-    events_dir = get_calendar_dir() / "events"
+def get_events_dir(account: str) -> Path:
+    """Get events directory for an account."""
+    events_dir = get_calendar_dir(account) / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
     return events_dir
 
 
-def get_sync_state(service: str) -> dict[str, Any]:
-    """
-    Get sync state for a service (gmail or calendar).
-
-    Returns dict with:
-    - last_sync: ISO timestamp of last successful sync
-    - last_history_id: Gmail history ID for incremental sync
-    - sync_tokens: Dict of calendar sync tokens
-    - email_count: Number of emails synced
-    - event_count: Number of events synced
-    """
-    if service == "gmail":
-        state_file = get_gmail_dir() / "sync_state.json"
-    elif service == "calendar":
-        state_file = get_calendar_dir() / "sync_state.json"
-    else:
-        raise ValueError(f"Unknown service: {service}")
-
-    if not state_file.exists():
-        return {
-            "last_sync": None,
-            "last_history_id": None,
-            "sync_tokens": {},
-            "email_count": 0,
-            "event_count": 0,
-        }
-
-    try:
-        with open(state_file) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(f"Failed to load sync state for {service}: {e}")
-        return {
-            "last_sync": None,
-            "last_history_id": None,
-            "sync_tokens": {},
-            "email_count": 0,
-            "event_count": 0,
-        }
+def get_calendar_sync_state_file(account: str) -> Path:
+    """Get Calendar sync state file path."""
+    return get_calendar_dir(account) / "sync_state.json"
 
 
-def save_sync_state(service: str, state: dict[str, Any]) -> None:
-    """Save sync state for a service."""
-    if service == "gmail":
-        state_file = get_gmail_dir() / "sync_state.json"
-    elif service == "calendar":
-        state_file = get_calendar_dir() / "sync_state.json"
-    else:
-        raise ValueError(f"Unknown service: {service}")
+# Sync state management
+def load_sync_state(state_file: Path) -> dict[str, Any]:
+    """Load sync state from file."""
+    if state_file.exists():
+        try:
+            with open(state_file) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load sync state: {e}")
+    return {}
 
-    # Update last_sync timestamp
-    state["last_sync"] = datetime.now(timezone.utc).isoformat()
 
+def save_sync_state(state_file: Path, state: dict[str, Any]) -> None:
+    """Save sync state to file."""
+    state["updated_at"] = datetime.utcnow().isoformat()
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)
 
-    logger.debug(f"Saved sync state for {service}")
 
-
-def save_email(email_data: dict[str, Any]) -> Path:
+# Email storage
+def save_email(account: str, email_data: dict[str, Any]) -> Path:
     """
-    Save an email to disk.
+    Save an email to storage.
 
-    Args:
-        email_data: Email data dict with id, subject, body, etc.
-
-    Returns:
-        Path to saved email JSON file.
+    Adds account field to the email data.
     """
-    email_id = email_data["id"]
-    email_file = get_gmail_emails_dir() / f"{email_id}.json"
+    message_id = email_data.get("id", "unknown")
+    email_data["account"] = account
 
+    email_file = get_emails_dir(account) / f"{message_id}.json"
     with open(email_file, "w") as f:
         json.dump(email_data, f, indent=2)
 
     return email_file
 
 
+def load_email(account: str, message_id: str) -> dict[str, Any] | None:
+    """Load an email from storage."""
+    email_file = get_emails_dir(account) / f"{message_id}.json"
+    if email_file.exists():
+        try:
+            with open(email_file) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load email {message_id}: {e}")
+    return None
+
+
+def list_emails(account: str) -> list[str]:
+    """List all email IDs for an account."""
+    emails_dir = get_emails_dir(account)
+    return [f.stem for f in emails_dir.glob("*.json")]
+
+
 def save_attachment(
-    email_id: str, filename: str, content: bytes
+    account: str,
+    message_id: str,
+    filename: str,
+    data: bytes,
 ) -> Path:
-    """
-    Save an email attachment to disk.
-
-    Args:
-        email_id: ID of the parent email
-        filename: Original filename of attachment
-        content: Raw attachment bytes
-
-    Returns:
-        Path to saved attachment file.
-    """
-    # Create directory for this email's attachments
-    attachment_dir = get_gmail_attachments_dir() / email_id
-    attachment_dir.mkdir(parents=True, exist_ok=True)
-
+    """Save an email attachment."""
+    attachment_dir = get_attachments_dir(account, message_id)
     # Sanitize filename
-    safe_filename = "".join(
-        c if c.isalnum() or c in "._-" else "_" for c in filename
-    )
-    if not safe_filename:
-        safe_filename = "attachment"
+    safe_filename = "".join(c for c in filename if c.isalnum() or c in "._- ")
+    attachment_file = attachment_dir / safe_filename
 
-    attachment_path = attachment_dir / safe_filename
+    with open(attachment_file, "wb") as f:
+        f.write(data)
 
-    # Handle duplicate filenames
-    counter = 1
-    original_path = attachment_path
-    while attachment_path.exists():
-        stem = original_path.stem
-        suffix = original_path.suffix
-        attachment_path = attachment_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-
-    with open(attachment_path, "wb") as f:
-        f.write(content)
-
-    return attachment_path
+    return attachment_file
 
 
-def save_calendar_event(event_data: dict[str, Any]) -> Path:
+# Calendar event storage
+def save_event(account: str, event_data: dict[str, Any]) -> Path:
     """
-    Save a calendar event to disk.
+    Save a calendar event to storage.
 
-    Args:
-        event_data: Event data dict with id, summary, start, end, etc.
-
-    Returns:
-        Path to saved event JSON file.
+    Adds account field to the event data.
     """
-    event_id = event_data["id"]
-    # Calendar event IDs can have special characters, sanitize
-    safe_id = "".join(c if c.isalnum() or c in "_-" else "_" for c in event_id)
-    event_file = get_calendar_events_dir() / f"{safe_id}.json"
+    event_id = event_data.get("id", "unknown")
+    event_data["account"] = account
 
+    # Sanitize event_id for filename (Google calendar IDs can have special chars)
+    safe_id = "".join(c for c in event_id if c.isalnum() or c in "_-")
+
+    event_file = get_events_dir(account) / f"{safe_id}.json"
     with open(event_file, "w") as f:
         json.dump(event_data, f, indent=2)
 
     return event_file
 
 
-def load_email(email_id: str) -> dict[str, Any] | None:
-    """Load an email by ID."""
-    email_file = get_gmail_emails_dir() / f"{email_id}.json"
-    if not email_file.exists():
-        return None
+def load_event(account: str, event_id: str) -> dict[str, Any] | None:
+    """Load a calendar event from storage."""
+    # Try both original and sanitized IDs
+    safe_id = "".join(c for c in event_id if c.isalnum() or c in "_-")
 
-    with open(email_file) as f:
-        return json.load(f)
-
-
-def load_calendar_event(event_id: str) -> dict[str, Any] | None:
-    """Load a calendar event by ID."""
-    safe_id = "".join(c if c.isalnum() or c in "_-" else "_" for c in event_id)
-    event_file = get_calendar_events_dir() / f"{safe_id}.json"
-    if not event_file.exists():
-        return None
-
-    with open(event_file) as f:
-        return json.load(f)
+    for eid in [event_id, safe_id]:
+        event_file = get_events_dir(account) / f"{eid}.json"
+        if event_file.exists():
+            try:
+                with open(event_file) as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load event {event_id}: {e}")
+    return None
 
 
-def list_emails() -> list[Path]:
-    """List all stored email files."""
-    emails_dir = get_gmail_emails_dir()
-    return sorted(emails_dir.glob("*.json"))
+def list_events(account: str) -> list[str]:
+    """List all event IDs for an account."""
+    events_dir = get_events_dir(account)
+    return [f.stem for f in events_dir.glob("*.json")]
 
 
-def list_calendar_events() -> list[Path]:
-    """List all stored calendar event files."""
-    events_dir = get_calendar_events_dir()
-    return sorted(events_dir.glob("*.json"))
+# Cross-account search helpers
+def list_all_accounts_with_data() -> list[str]:
+    """List all accounts that have synced data."""
+    data_dir = get_data_dir()
+    accounts = []
+    for item in data_dir.iterdir():
+        if item.is_dir():
+            # Check if it has gmail or calendar data
+            if (item / "gmail").exists() or (item / "calendar").exists():
+                accounts.append(item.name)
+    return sorted(accounts)
 
 
-def get_storage_stats() -> dict[str, Any]:
-    """Get statistics about stored data."""
-    email_files = list_emails()
-    event_files = list_calendar_events()
+def load_all_emails(account: str | None = None) -> list[dict[str, Any]]:
+    """
+    Load all emails, optionally filtered by account.
 
-    # Count attachments
-    attachments_dir = get_gmail_attachments_dir()
-    attachment_count = sum(
-        1 for f in attachments_dir.rglob("*") if f.is_file()
-    )
+    If account is None, loads from all accounts.
+    """
+    emails: list[dict[str, Any]] = []
 
-    # Calculate total size
-    total_size = 0
-    for f in email_files:
-        total_size += f.stat().st_size
-    for f in event_files:
-        total_size += f.stat().st_size
-    for f in attachments_dir.rglob("*"):
-        if f.is_file():
-            total_size += f.stat().st_size
+    if account:
+        accounts = [account]
+    else:
+        accounts = list_all_accounts_with_data()
 
-    return {
-        "email_count": len(email_files),
-        "event_count": len(event_files),
-        "attachment_count": attachment_count,
-        "total_size_bytes": total_size,
-        "total_size_mb": round(total_size / (1024 * 1024), 2),
+    for acc in accounts:
+        emails_dir = get_emails_dir(acc)
+        for email_file in emails_dir.glob("*.json"):
+            try:
+                with open(email_file) as f:
+                    email = json.load(f)
+                    # Ensure account field is set
+                    email["account"] = acc
+                    emails.append(email)
+            except Exception as e:
+                logger.warning(f"Failed to load email {email_file}: {e}")
+
+    return emails
+
+
+def load_all_events(account: str | None = None) -> list[dict[str, Any]]:
+    """
+    Load all calendar events, optionally filtered by account.
+
+    If account is None, loads from all accounts.
+    """
+    events: list[dict[str, Any]] = []
+
+    if account:
+        accounts = [account]
+    else:
+        accounts = list_all_accounts_with_data()
+
+    for acc in accounts:
+        events_dir = get_events_dir(acc)
+        for event_file in events_dir.glob("*.json"):
+            try:
+                with open(event_file) as f:
+                    event = json.load(f)
+                    # Ensure account field is set
+                    event["account"] = acc
+                    events.append(event)
+            except Exception as e:
+                logger.warning(f"Failed to load event {event_file}: {e}")
+
+    return events
+
+
+def get_storage_stats(account: str | None = None) -> dict[str, Any]:
+    """Get storage statistics for an account or all accounts."""
+    if account:
+        accounts = [account]
+    else:
+        accounts = list_all_accounts_with_data()
+
+    stats: dict[str, Any] = {
+        "accounts": {},
+        "total_emails": 0,
+        "total_events": 0,
     }
+
+    for acc in accounts:
+        email_count = len(list_emails(acc))
+        event_count = len(list_events(acc))
+
+        stats["accounts"][acc] = {
+            "emails": email_count,
+            "events": event_count,
+        }
+        stats["total_emails"] += email_count
+        stats["total_events"] += event_count
+
+    return stats

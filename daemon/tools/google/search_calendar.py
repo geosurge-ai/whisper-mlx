@@ -1,206 +1,224 @@
 """
-Search calendar tool.
+Search calendar events tool.
 
-Searches through synced Google Calendar events.
+Search locally synced calendar events by various criteria.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime
 from typing import Any
 
+from daemon.sync.storage import load_all_events
+
 from ..base import tool
-from ...sync.storage import get_calendar_events_dir, list_calendar_events
 
 logger = logging.getLogger("qwen.tools.google")
 
 
-def _parse_date(date_str: str | None) -> datetime | None:
-    """Parse date string to datetime."""
-    if not date_str:
-        return None
-    try:
-        # Handle ISO format with timezone
-        if "T" in date_str:
-            if date_str.endswith("Z"):
-                date_str = date_str[:-1] + "+00:00"
-            return datetime.fromisoformat(date_str)
-        # Handle date-only format (all-day events)
-        return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
-
-
-def _matches_query(event: dict[str, Any], query: str) -> bool:
-    """Check if event matches text query."""
-    query_lower = query.lower()
-    
-    # Search in summary, description, and location
-    searchable = [
-        event.get("summary", ""),
-        event.get("description", ""),
-        event.get("location", ""),
+def _parse_date(date_str: str) -> datetime | None:
+    """Try to parse a date string in various formats."""
+    formats = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
     ]
-    
-    for field in searchable:
-        if query_lower in field.lower():
-            return True
-    
-    return False
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
 
 
-def _in_date_range(
+def _parse_event_datetime(dt_str: str) -> datetime | None:
+    """Parse event start/end datetime."""
+    if not dt_str:
+        return None
+
+    # Try ISO format with timezone
+    formats = [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(dt_str.replace("Z", "+00:00"), fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
+def _event_matches_criteria(
     event: dict[str, Any],
-    after: datetime | None,
-    before: datetime | None,
+    query: str | None,
+    after_date: str | None,
+    before_date: str | None,
+    calendar_name: str | None,
+    attendee: str | None,
+    account: str | None,
 ) -> bool:
-    """Check if event is within date range."""
-    event_start = _parse_date(event.get("start"))
-    if not event_start:
-        return True  # Include events without dates
-    
-    if after and event_start < after:
+    """Check if an event matches the search criteria."""
+    # Account filter
+    if account and event.get("account", "") != account:
         return False
-    
-    if before and event_start > before:
-        return False
-    
+
+    # Calendar name filter
+    if calendar_name:
+        event_cal = event.get("calendar_name", "").lower()
+        if calendar_name.lower() not in event_cal:
+            return False
+
+    # Full-text query
+    if query:
+        query_lower = query.lower()
+        searchable = " ".join([
+            event.get("summary", ""),
+            event.get("description", ""),
+            event.get("location", ""),
+        ]).lower()
+        if not re.search(re.escape(query_lower), searchable):
+            return False
+
+    # Date filters (on event start time)
+    event_start = _parse_event_datetime(event.get("start", ""))
+    if event_start:
+        if after_date:
+            after = _parse_date(after_date)
+            if after and event_start.replace(tzinfo=None) < after:
+                return False
+
+        if before_date:
+            before = _parse_date(before_date)
+            if before and event_start.replace(tzinfo=None) > before:
+                return False
+
+    # Attendee filter
+    if attendee:
+        attendee_lower = attendee.lower()
+        found = False
+        for att in event.get("attendees", []):
+            email = att.get("email", "").lower()
+            name = att.get("display_name", "").lower()
+            if attendee_lower in email or attendee_lower in name:
+                found = True
+                break
+        if not found:
+            return False
+
     return True
 
 
 @tool(
     name="search_calendar",
-    description="""Search through synced Google Calendar events.
+    description="""Search downloaded calendar events by various criteria.
 
-Use this tool to find calendar events by:
-- Text search (title, description, location)
-- Date range
-- Calendar ID
+Searches across all synced Google Calendar accounts unless a specific account is specified.
+Returns matching events with details.
 
-Returns a list of matching events. Use get_calendar_event for full details.
-
-Common date range shortcuts:
-- "today" - events happening today
-- "this_week" - events in the current week
-- "next_week" - events in the next 7 days""",
+Use this to find events by title, description, date range, or attendees.""",
     parameters={
         "type": "object",
         "properties": {
+            "account": {
+                "type": "string",
+                "description": "Account name to search (e.g., 'ep', 'jm'). If not specified, searches all accounts.",
+            },
             "query": {
                 "type": "string",
-                "description": "Text to search for in title, description, and location",
+                "description": "Search in event title, description, and location",
             },
-            "date_range": {
+            "after_date": {
                 "type": "string",
-                "description": "Date range shortcut: 'today', 'this_week', 'next_week', or custom ISO dates",
+                "description": "Only events starting after this date (YYYY-MM-DD)",
             },
-            "after": {
+            "before_date": {
                 "type": "string",
-                "description": "Only events after this date (ISO format: 2024-01-15)",
+                "description": "Only events starting before this date (YYYY-MM-DD)",
             },
-            "before": {
+            "calendar_name": {
                 "type": "string",
-                "description": "Only events before this date (ISO format: 2024-01-15)",
+                "description": "Filter by calendar name (partial match)",
             },
-            "calendar_id": {
+            "attendee": {
                 "type": "string",
-                "description": "Filter by calendar ID (partial match)",
+                "description": "Filter by attendee email or name (partial match)",
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of results (default: 50)",
+                "description": "Maximum number of results (default: 20)",
             },
         },
         "required": [],
     },
 )
 def search_calendar(
-    query: str = "",
-    date_range: str = "",
-    after: str = "",
-    before: str = "",
-    calendar_id: str = "",
-    limit: int = 50,
+    account: str | None = None,
+    query: str | None = None,
+    after_date: str | None = None,
+    before_date: str | None = None,
+    calendar_name: str | None = None,
+    attendee: str | None = None,
+    limit: int = 20,
 ) -> str:
-    """Search through synced calendar events."""
-    events_dir = get_calendar_events_dir()
-    event_files = list_calendar_events()
-    
-    if not event_files:
+    """Search downloaded calendar events."""
+    logger.info(f"Searching calendar: account={account}, query={query}, after={after_date}")
+
+    # Load all events (optionally filtered by account)
+    all_events = load_all_events(account)
+
+    if not all_events:
         return json.dumps({
             "status": "success",
-            "message": "No calendar events synced yet. Sync will run automatically.",
+            "count": 0,
+            "message": "No events found. Events may not be synced yet.",
             "results": [],
-            "total": 0,
         })
-    
-    # Handle date range shortcuts
-    now = datetime.now(timezone.utc)
-    after_dt: datetime | None = None
-    before_dt: datetime | None = None
-    
-    if date_range == "today":
-        after_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        before_dt = after_dt + timedelta(days=1)
-    elif date_range == "this_week":
-        # Start of week (Monday)
-        after_dt = now - timedelta(days=now.weekday())
-        after_dt = after_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        before_dt = after_dt + timedelta(days=7)
-    elif date_range == "next_week":
-        after_dt = now
-        before_dt = now + timedelta(days=7)
-    else:
-        if after:
-            after_dt = _parse_date(after)
-        if before:
-            before_dt = _parse_date(before)
-    
-    results: list[dict[str, Any]] = []
-    
-    for event_file in event_files:
-        try:
-            with open(event_file) as f:
-                event = json.load(f)
-            
-            # Apply filters
-            if query and not _matches_query(event, query):
-                continue
-            if not _in_date_range(event, after_dt, before_dt):
-                continue
-            if calendar_id and calendar_id.lower() not in event.get("calendar_id", "").lower():
-                continue
-            
-            # Build result summary
-            results.append({
-                "id": event["id"],
-                "summary": event.get("summary", "(No title)"),
+
+    # Filter events
+    matching: list[dict[str, Any]] = []
+    for event in all_events:
+        if _event_matches_criteria(
+            event,
+            query,
+            after_date,
+            before_date,
+            calendar_name,
+            attendee,
+            account,
+        ):
+            matching.append({
+                "id": event.get("id", ""),
+                "account": event.get("account", ""),
+                "summary": event.get("summary", ""),
                 "start": event.get("start", ""),
                 "end": event.get("end", ""),
-                "is_all_day": event.get("is_all_day", False),
+                "all_day": event.get("all_day", False),
                 "location": event.get("location", ""),
                 "calendar_name": event.get("calendar_name", ""),
                 "status": event.get("status", ""),
-                "recurring": event.get("recurring", False),
+                "attendee_count": len(event.get("attendees", [])),
             })
-            
-            if len(results) >= limit:
-                break
-                
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to read event {event_file}: {e}")
-            continue
-    
-    # Sort by start date (soonest first)
-    results.sort(key=lambda x: x.get("start", ""))
-    
+
+    # Sort by start time
+    matching.sort(key=lambda x: x.get("start", ""))
+
+    # Apply limit
+    results = matching[:limit]
+
     return json.dumps({
         "status": "success",
+        "count": len(results),
+        "total_matches": len(matching),
         "results": results,
-        "total": len(results),
-        "limit": limit,
     })
 
 

@@ -30,4 +30,27 @@ echo "  GET  /v1/profiles   - List profiles"
 echo "  GET  /v1/tools      - List tools"
 echo ""
 
+# Check Google sync setup
+OAUTH_SOURCE=""
+if passveil show google/qwen-sync-oauth &>/dev/null; then
+    OAUTH_SOURCE="passveil"
+elif [[ -f "$HOME/.qwen/client_secrets.json" ]]; then
+    OAUTH_SOURCE="file"
+fi
+
+if [[ -n "$OAUTH_SOURCE" ]]; then
+    ACCOUNTS=$(python -c "from daemon.sync.auth import list_accounts; print(', '.join(list_accounts()) or 'none')" 2>/dev/null || echo "error")
+    echo "Google Sync:"
+    echo "  OAuth configured: ✓ (from $OAUTH_SOURCE)"
+    echo "  Accounts: $ACCOUNTS"
+    if [[ "$ACCOUNTS" == "none" ]]; then
+        echo "  ⚠️  No accounts authenticated. Run: python -m daemon.sync.auth --account NAME"
+    fi
+else
+    echo "Google Sync:"
+    echo "  OAuth configured: ✗"
+    echo "  ⚠️  To enable Gmail/Calendar sync, see docs/AUTH.md"
+fi
+echo ""
+
 python -m daemon.server "$@"
