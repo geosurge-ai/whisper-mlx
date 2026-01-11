@@ -4,8 +4,10 @@
 
 set -euo pipefail
 
-SERVICE_NAME="com.qwen.daemon"
-PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
+SERVICE_DAEMON="com.qwen.daemon"
+SERVICE_FRONTEND="com.qwen.frontend"
+PLIST_DAEMON="$HOME/Library/LaunchAgents/${SERVICE_DAEMON}.plist"
+PLIST_FRONTEND="$HOME/Library/LaunchAgents/${SERVICE_FRONTEND}.plist"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$HOME/.qwen/logs"
 
@@ -39,17 +41,17 @@ check_prerequisites() {
     fi
 }
 
-generate_plist() {
+generate_daemon_plist() {
     mkdir -p "$LOG_DIR"
-    mkdir -p "$(dirname "$PLIST_PATH")"
+    mkdir -p "$(dirname "$PLIST_DAEMON")"
 
-    cat > "$PLIST_PATH" << EOF
+    cat > "$PLIST_DAEMON" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${SERVICE_NAME}</string>
+    <string>${SERVICE_DAEMON}</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -102,76 +104,164 @@ generate_plist() {
 </dict>
 </plist>
 EOF
-    info "Generated plist at $PLIST_PATH"
+    info "Generated daemon plist at $PLIST_DAEMON"
+}
+
+generate_frontend_plist() {
+    mkdir -p "$LOG_DIR"
+    mkdir -p "$(dirname "$PLIST_FRONTEND")"
+
+    cat > "$PLIST_FRONTEND" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${SERVICE_FRONTEND}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/nix/var/nix/profiles/default/bin/nix</string>
+        <string>develop</string>
+        <string>${PROJECT_DIR}</string>
+        <string>--command</string>
+        <string>bash</string>
+        <string>-c</string>
+        <string>cd frontend &amp;&amp; pnpm dev</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${PROJECT_DIR}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>${HOME}</string>
+        <key>PATH</key>
+        <string>/nix/var/nix/profiles/default/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/frontend.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/frontend.stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+EOF
+    info "Generated frontend plist at $PLIST_FRONTEND"
 }
 
 do_install() {
-    info "Installing Qwen Daemon service..."
+    info "Installing Qwen services..."
     check_prerequisites
 
     # Unload if already loaded
-    if launchctl list | grep -q "$SERVICE_NAME"; then
-        warn "Service already loaded. Unloading first..."
-        launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "$SERVICE_DAEMON"; then
+        warn "Daemon service already loaded. Unloading first..."
+        launchctl unload "$PLIST_DAEMON" 2>/dev/null || true
+    fi
+    if launchctl list 2>/dev/null | grep -q "$SERVICE_FRONTEND"; then
+        warn "Frontend service already loaded. Unloading first..."
+        launchctl unload "$PLIST_FRONTEND" 2>/dev/null || true
     fi
 
-    generate_plist
+    generate_daemon_plist
+    generate_frontend_plist
 
-    info "Loading service..."
-    launchctl load "$PLIST_PATH"
+    info "Loading daemon service..."
+    launchctl load "$PLIST_DAEMON"
 
-    # Verify it's running
-    sleep 2
-    if launchctl list | grep -q "$SERVICE_NAME"; then
-        info "Service installed and running!"
-        echo ""
-        do_status
-    else
-        error "Service failed to start. Check logs with: $0 logs"
-        exit 1
-    fi
+    info "Loading frontend service..."
+    launchctl load "$PLIST_FRONTEND"
+
+    # Verify they're running
+    sleep 3
+    echo ""
+    do_status
 }
 
 do_uninstall() {
-    info "Uninstalling Qwen Daemon service..."
+    info "Uninstalling Qwen services..."
 
-    if [[ -f "$PLIST_PATH" ]]; then
-        launchctl unload "$PLIST_PATH" 2>/dev/null || true
-        rm -f "$PLIST_PATH"
-        info "Service uninstalled."
+    if [[ -f "$PLIST_DAEMON" ]]; then
+        launchctl unload "$PLIST_DAEMON" 2>/dev/null || true
+        rm -f "$PLIST_DAEMON"
+        info "Daemon service uninstalled."
     else
-        warn "Service plist not found at $PLIST_PATH"
+        warn "Daemon plist not found at $PLIST_DAEMON"
+    fi
+
+    if [[ -f "$PLIST_FRONTEND" ]]; then
+        launchctl unload "$PLIST_FRONTEND" 2>/dev/null || true
+        rm -f "$PLIST_FRONTEND"
+        info "Frontend service uninstalled."
+    else
+        warn "Frontend plist not found at $PLIST_FRONTEND"
+    fi
+}
+
+show_service_status() {
+    local name="$1"
+    local service_id="$2"
+    local svc_info
+    svc_info=$(launchctl list 2>/dev/null | grep "$service_id" || true)
+    if [[ -n "$svc_info" ]]; then
+        local pid=$(echo "$svc_info" | awk '{print $1}')
+        if [[ "$pid" != "-" && "$pid" =~ ^[0-9]+$ ]]; then
+            echo -e "  $name: ${GREEN}Running${NC} (PID: $pid)"
+        else
+            echo -e "  $name: ${YELLOW}Loaded but not running${NC}"
+        fi
+    else
+        echo -e "  $name: ${RED}Not installed${NC}"
     fi
 }
 
 do_status() {
     echo "=== Service Status ==="
-    local svc_info
-    svc_info=$(launchctl list 2>/dev/null | grep "$SERVICE_NAME" || true)
-    if [[ -n "$svc_info" ]]; then
-        local pid=$(echo "$svc_info" | awk '{print $1}')
-        if [[ "$pid" != "-" && "$pid" =~ ^[0-9]+$ ]]; then
-            echo -e "Status: ${GREEN}Running${NC} (PID: $pid)"
-        else
-            echo -e "Status: ${YELLOW}Loaded but not running${NC}"
-        fi
-        echo "  $svc_info"
-    else
-        echo -e "Status: ${RED}Not installed${NC}"
-    fi
+    show_service_status "Daemon" "$SERVICE_DAEMON"
+    show_service_status "Frontend" "$SERVICE_FRONTEND"
 
     echo ""
     echo "=== Health Check ==="
-    if curl -s http://127.0.0.1:5997/health | grep -q "ok"; then
-        echo -e "API: ${GREEN}Healthy${NC}"
+    if curl -s http://127.0.0.1:5997/health 2>/dev/null | grep -q "healthy"; then
+        echo -e "  Backend API (5997): ${GREEN}Healthy${NC}"
     else
-        echo -e "API: ${RED}Not responding${NC}"
+        echo -e "  Backend API (5997): ${RED}Not responding${NC}"
+    fi
+    if curl -s http://127.0.0.1:8792/ 2>/dev/null | grep -q -E "(html|script)"; then
+        echo -e "  Frontend UI (8792): ${GREEN}Running${NC}"
+    else
+        echo -e "  Frontend UI (8792): ${RED}Not responding${NC}"
     fi
 
     echo ""
+    echo "=== URLs ==="
+    echo "  Frontend: http://localhost:8792"
+    echo "  API:      http://localhost:5997"
+
+    echo ""
     echo "=== Log Files ==="
-    echo "  stdout: $LOG_DIR/daemon.stdout.log"
-    echo "  stderr: $LOG_DIR/daemon.stderr.log"
+    echo "  Daemon:   $LOG_DIR/daemon.stderr.log"
+    echo "  Frontend: $LOG_DIR/frontend.stderr.log"
 
     echo ""
     echo "=== Synced Data ==="
@@ -191,29 +281,45 @@ do_status() {
 }
 
 do_logs() {
-    if [[ -f "$LOG_DIR/daemon.stderr.log" ]]; then
-        echo "=== Recent stderr (last 50 lines) ==="
-        tail -50 "$LOG_DIR/daemon.stderr.log"
+    local service="${2:-all}"
+
+    if [[ "$service" == "all" || "$service" == "daemon" ]]; then
+        echo "=== Daemon Logs (last 30 lines) ==="
+        tail -30 "$LOG_DIR/daemon.stderr.log" 2>/dev/null || echo "  (no logs yet)"
+        echo ""
     fi
-    echo ""
-    if [[ -f "$LOG_DIR/daemon.stdout.log" ]]; then
-        echo "=== Recent stdout (last 20 lines) ==="
-        tail -20 "$LOG_DIR/daemon.stdout.log"
+
+    if [[ "$service" == "all" || "$service" == "frontend" ]]; then
+        echo "=== Frontend Logs (last 20 lines) ==="
+        tail -20 "$LOG_DIR/frontend.stderr.log" 2>/dev/null || echo "  (no logs yet)"
     fi
 }
 
 do_restart() {
-    info "Restarting Qwen Daemon..."
-    if [[ -f "$PLIST_PATH" ]]; then
-        launchctl unload "$PLIST_PATH" 2>/dev/null || true
-        sleep 1
-        launchctl load "$PLIST_PATH"
-        sleep 2
-        do_status
+    info "Restarting Qwen services..."
+
+    if [[ -f "$PLIST_DAEMON" ]]; then
+        launchctl unload "$PLIST_DAEMON" 2>/dev/null || true
+    fi
+    if [[ -f "$PLIST_FRONTEND" ]]; then
+        launchctl unload "$PLIST_FRONTEND" 2>/dev/null || true
+    fi
+
+    sleep 1
+
+    if [[ -f "$PLIST_DAEMON" ]]; then
+        launchctl load "$PLIST_DAEMON"
     else
-        error "Service not installed. Run: $0 install"
+        error "Daemon not installed. Run: $0 install"
         exit 1
     fi
+
+    if [[ -f "$PLIST_FRONTEND" ]]; then
+        launchctl load "$PLIST_FRONTEND"
+    fi
+
+    sleep 3
+    do_status
 }
 
 # Main
@@ -234,21 +340,25 @@ case "${1:-help}" in
         do_restart
         ;;
     *)
-        echo "Qwen Daemon Service Manager"
+        echo "Qwen Service Manager"
         echo ""
         echo "Usage: $0 <command>"
         echo ""
         echo "Commands:"
-        echo "  install    Install and start the daemon as a LaunchAgent"
-        echo "  uninstall  Stop and remove the LaunchAgent"
+        echo "  install    Install and start daemon + frontend as LaunchAgents"
+        echo "  uninstall  Stop and remove both LaunchAgents"
         echo "  status     Show service status and health check"
-        echo "  restart    Restart the service"
+        echo "  restart    Restart both services"
         echo "  logs       Show recent log output"
         echo ""
-        echo "The service will:"
+        echo "The services will:"
         echo "  - Start automatically on login"
-        echo "  - Restart if it crashes"
+        echo "  - Restart if they crash"
         echo "  - Sync Gmail/Calendar in the background"
+        echo ""
+        echo "URLs:"
+        echo "  Frontend: http://localhost:8792"
+        echo "  API:      http://localhost:5997"
         echo ""
         echo "Log files: $LOG_DIR/"
         ;;
