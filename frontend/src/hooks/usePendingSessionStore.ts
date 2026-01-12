@@ -4,9 +4,12 @@
  * This hook provides a stable store for sessions with pending optimistic updates
  * (user messages not yet confirmed by the server). It prevents race conditions
  * when switching between sessions during generation.
+ *
+ * IMPORTANT: Uses a module-level singleton to survive React StrictMode remounts.
+ * Without this, the store would be reset when StrictMode re-runs effects.
  */
 
-import { useRef, useCallback, useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 import type { Session } from '../api'
 
 export interface PendingSessionState {
@@ -42,17 +45,22 @@ export interface PendingSessionStore {
 }
 
 /**
+ * Module-level singleton store that survives React StrictMode remounts.
+ * This is intentionally outside the hook to persist across component lifecycles.
+ */
+const globalPendingStore = new Map<string, PendingSessionState>()
+
+/**
  * Hook that provides a stable pending session store
  */
 export function usePendingSessionStore(): PendingSessionStore {
-  const store = useRef<Map<string, PendingSessionState>>(new Map())
 
   const has = useCallback((sessionId: string): boolean => {
-    return store.current.has(sessionId)
+    return globalPendingStore.has(sessionId)
   }, [])
 
   const get = useCallback((sessionId: string): PendingSessionState | undefined => {
-    return store.current.get(sessionId)
+    return globalPendingStore.get(sessionId)
   }, [])
 
   const recordOptimisticMessage = useCallback((
@@ -60,11 +68,11 @@ export function usePendingSessionStore(): PendingSessionStore {
     session: Session,
     messageId: string
   ) => {
-    const existing = store.current.get(sessionId)
+    const existing = globalPendingStore.get(sessionId)
     const pendingMessageIds = existing?.pendingMessageIds ?? new Set()
     pendingMessageIds.add(messageId)
 
-    store.current.set(sessionId, {
+    globalPendingStore.set(sessionId, {
       session,
       pendingMessageIds,
       isGenerating: true,
@@ -72,10 +80,10 @@ export function usePendingSessionStore(): PendingSessionStore {
   }, [])
 
   const applyComplete = useCallback((sessionId: string, finalSession: Session) => {
-    const existing = store.current.get(sessionId)
+    const existing = globalPendingStore.get(sessionId)
     if (existing) {
       // Clear pending message IDs since server now has them
-      store.current.set(sessionId, {
+      globalPendingStore.set(sessionId, {
         session: finalSession,
         pendingMessageIds: new Set(),
         isGenerating: false,
@@ -84,15 +92,15 @@ export function usePendingSessionStore(): PendingSessionStore {
   }, [])
 
   const applyError = useCallback((sessionId: string, messageIdToRemove: string): Session | undefined => {
-    const existing = store.current.get(sessionId)
+    const existing = globalPendingStore.get(sessionId)
     if (!existing) return undefined
 
     const updatedMessages = existing.session.messages.filter(m => m.id !== messageIdToRemove)
     const updatedSession = { ...existing.session, messages: updatedMessages }
-    
+
     existing.pendingMessageIds.delete(messageIdToRemove)
-    
-    store.current.set(sessionId, {
+
+    globalPendingStore.set(sessionId, {
       session: updatedSession,
       pendingMessageIds: existing.pendingMessageIds,
       isGenerating: existing.isGenerating,
@@ -102,18 +110,18 @@ export function usePendingSessionStore(): PendingSessionStore {
   }, [])
 
   const clear = useCallback((sessionId: string) => {
-    store.current.delete(sessionId)
+    globalPendingStore.delete(sessionId)
   }, [])
 
   const getForHydration = useCallback((sessionId: string): Session | undefined => {
-    const pending = store.current.get(sessionId)
+    const pending = globalPendingStore.get(sessionId)
     return pending?.session
   }, [])
 
   const markComplete = useCallback((sessionId: string) => {
-    const existing = store.current.get(sessionId)
+    const existing = globalPendingStore.get(sessionId)
     if (existing) {
-      store.current.set(sessionId, {
+      globalPendingStore.set(sessionId, {
         ...existing,
         isGenerating: false,
       })
