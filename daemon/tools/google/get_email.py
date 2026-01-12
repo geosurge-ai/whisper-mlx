@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from daemon.sync.storage import list_all_accounts_with_data, load_email
+from daemon.sync.storage import list_all_accounts_with_data, load_email, resolve_account
 
 from ..base import tool
 
@@ -43,11 +43,13 @@ def get_email(
     account: str | None = None,
 ) -> str:
     """Get full email content by ID."""
-    logger.info(f"Getting email: id={email_id}, account={account}")
+    # Resolve email address to account shortname if needed
+    resolved_account = resolve_account(account) if account else None
+    logger.info(f"Getting email: id={email_id}, account={account} (resolved={resolved_account})")
 
     # If account specified, load directly
-    if account:
-        email = load_email(account, email_id)
+    if resolved_account:
+        email = load_email(resolved_account, email_id)
         if email:
             return json.dumps({
                 "status": "success",
@@ -55,7 +57,7 @@ def get_email(
             })
         return json.dumps({
             "status": "error",
-            "error": f"Email {email_id} not found in account '{account}'",
+            "error": f"Email {email_id} not found in account '{resolved_account}'",
         })
 
     # Search across all accounts

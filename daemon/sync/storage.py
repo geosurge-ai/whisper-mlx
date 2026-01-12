@@ -27,11 +27,93 @@ logger = logging.getLogger("qwen.sync.storage")
 QWEN_DIR = Path.home() / ".qwen"
 DATA_DIR = QWEN_DIR / "data"
 
+# Cache for email->account mapping
+_email_to_account_cache: dict[str, str] = {}
+
 
 def get_data_dir() -> Path:
     """Get the base data directory."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR
+
+
+def _has_data(account_dir: Path) -> bool:
+    """Check if an account directory has actual synced data."""
+    events_dir = account_dir / "calendar" / "events"
+    emails_dir = account_dir / "gmail" / "emails"
+
+    # Check if there are any event or email files
+    if events_dir.exists() and any(events_dir.glob("*.json")):
+        return True
+    if emails_dir.exists() and any(emails_dir.glob("*.json")):
+        return True
+    return False
+
+
+def resolve_account(account_or_email: str) -> str:
+    """
+    Resolve an account shortname or email address to the actual data directory name.
+
+    Supports:
+    - Direct account shortnames (e.g., 'jm', 'ep') - returned as-is if directory exists with data
+    - Full email addresses (e.g., 'user@example.com') - resolved by scanning calendar data
+
+    Returns the account shortname to use for data access.
+    """
+    global _email_to_account_cache
+
+    data_dir = get_data_dir()
+
+    # If it's already a valid account directory with data, use it directly
+    account_path = data_dir / account_or_email
+    if account_path.exists() and _has_data(account_path):
+        return account_or_email
+
+    # Check cache for email resolution
+    if account_or_email in _email_to_account_cache:
+        return _email_to_account_cache[account_or_email]
+
+    # Try to resolve email address by scanning calendar data for calendar_id matches
+    # This handles cases like "user@example.com" -> "work"
+    for item in data_dir.iterdir():
+        if not item.is_dir():
+            continue
+
+        # Check calendar events for matching calendar_id
+        events_dir = item / "calendar" / "events"
+        if events_dir.exists():
+            for event_file in events_dir.glob("*.json"):
+                try:
+                    with open(event_file) as f:
+                        event = json.load(f)
+                    calendar_id = event.get("calendar_id", "")
+                    if calendar_id == account_or_email:
+                        # Found a match - cache and return
+                        _email_to_account_cache[account_or_email] = item.name
+                        logger.debug(f"Resolved email '{account_or_email}' to account '{item.name}'")
+                        return item.name
+                except Exception:
+                    continue
+
+        # Also check gmail for from/to matches
+        emails_dir = item / "gmail" / "emails"
+        if emails_dir.exists():
+            for email_file in list(emails_dir.glob("*.json"))[:10]:  # Sample first 10
+                try:
+                    with open(email_file) as f:
+                        email = json.load(f)
+                    # Check if this account's emails are from/to this address
+                    from_addr = email.get("from", "")
+                    if account_or_email.lower() in from_addr.lower():
+                        _email_to_account_cache[account_or_email] = item.name
+                        logger.debug(f"Resolved email '{account_or_email}' to account '{item.name}'")
+                        return item.name
+                except Exception:
+                    continue
+
+    # No resolution found - return as-is (may create empty results)
+    logger.warning(f"Could not resolve account '{account_or_email}' - using as-is")
+    return account_or_email
 
 
 def get_account_data_dir(account: str) -> Path:
@@ -222,11 +304,14 @@ def load_all_emails(account: str | None = None) -> list[dict[str, Any]]:
     Load all emails, optionally filtered by account.
 
     If account is None, loads from all accounts.
+    Supports both account shortnames (e.g., 'work') and email addresses (e.g., 'user@example.com').
     """
     emails: list[dict[str, Any]] = []
 
     if account:
-        accounts = [account]
+        # Resolve email address to account shortname if needed
+        resolved_account = resolve_account(account)
+        accounts = [resolved_account]
     else:
         accounts = list_all_accounts_with_data()
 
@@ -250,11 +335,14 @@ def load_all_events(account: str | None = None) -> list[dict[str, Any]]:
     Load all calendar events, optionally filtered by account.
 
     If account is None, loads from all accounts.
+    Supports both account shortnames (e.g., 'work') and email addresses (e.g., 'user@example.com').
     """
     events: list[dict[str, Any]] = []
 
     if account:
-        accounts = [account]
+        # Resolve email address to account shortname if needed
+        resolved_account = resolve_account(account)
+        accounts = [resolved_account]
     else:
         accounts = list_all_accounts_with_data()
 

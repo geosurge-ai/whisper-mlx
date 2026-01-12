@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from daemon.sync.storage import list_all_accounts_with_data, load_event
+from daemon.sync.storage import list_all_accounts_with_data, load_event, resolve_account
 
 from ..base import tool
 
@@ -43,11 +43,13 @@ def get_calendar_event(
     account: str | None = None,
 ) -> str:
     """Get full calendar event details by ID."""
-    logger.info(f"Getting calendar event: id={event_id}, account={account}")
+    # Resolve email address to account shortname if needed
+    resolved_account = resolve_account(account) if account else None
+    logger.info(f"Getting calendar event: id={event_id}, account={account} (resolved={resolved_account})")
 
     # If account specified, load directly
-    if account:
-        event = load_event(account, event_id)
+    if resolved_account:
+        event = load_event(resolved_account, event_id)
         if event:
             return json.dumps({
                 "status": "success",
@@ -55,7 +57,7 @@ def get_calendar_event(
             })
         return json.dumps({
             "status": "error",
-            "error": f"Event {event_id} not found in account '{account}'",
+            "error": f"Event {event_id} not found in account '{resolved_account}'",
         })
 
     # Search across all accounts

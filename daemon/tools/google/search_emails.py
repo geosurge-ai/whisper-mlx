@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from daemon.sync.storage import load_all_emails
+from daemon.sync.storage import load_all_emails, resolve_account
 
 from ..base import tool
 
@@ -179,10 +179,12 @@ def search_emails(
     limit: int = 20,
 ) -> str:
     """Search downloaded emails."""
-    logger.info(f"Searching emails: account={account}, from={from_email}, subject={subject}, query={query}")
+    # Resolve email address to account shortname if needed
+    resolved_account = resolve_account(account) if account else None
+    logger.info(f"Searching emails: account={account} (resolved={resolved_account}), from={from_email}, subject={subject}, query={query}")
 
     # Load all emails (optionally filtered by account)
-    all_emails = load_all_emails(account)
+    all_emails = load_all_emails(resolved_account)
 
     if not all_emails:
         return json.dumps({
@@ -204,7 +206,7 @@ def search_emails(
             after_date,
             before_date,
             has_attachments,
-            account,
+            resolved_account,
         ):
             # Create summary for results
             matching.append({

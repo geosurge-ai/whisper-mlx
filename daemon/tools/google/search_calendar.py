@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from daemon.sync.storage import load_all_events
+from daemon.sync.storage import load_all_events, resolve_account
 
 from ..base import tool
 
@@ -170,10 +170,12 @@ def search_calendar(
     limit: int = 20,
 ) -> str:
     """Search downloaded calendar events."""
-    logger.info(f"Searching calendar: account={account}, query={query}, after={after_date}")
+    # Resolve email address to account shortname if needed
+    resolved_account = resolve_account(account) if account else None
+    logger.info(f"Searching calendar: account={account} (resolved={resolved_account}), query={query}, after={after_date}")
 
     # Load all events (optionally filtered by account)
-    all_events = load_all_events(account)
+    all_events = load_all_events(resolved_account)
 
     if not all_events:
         return json.dumps({
@@ -193,7 +195,7 @@ def search_calendar(
             before_date,
             calendar_name,
             attendee,
-            account,
+            resolved_account,
         ):
             matching.append({
                 "id": event.get("id", ""),
