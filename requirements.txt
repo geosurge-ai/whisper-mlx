@@ -9,6 +9,13 @@ pyobjc-framework-Vision>=10.0  # macOS Vision framework for OCR
 pyobjc-framework-Quartz>=10.0  # Quartz support
 pymupdf>=1.24.0                # PDF to image conversion
 
+# Document text extraction (local-first)
+python-docx>=1.1.0             # DOCX extraction
+docx2txt>=0.8                  # DOCX fallback extractor
+striprtf>=0.0.27               # RTF extraction
+openpyxl>=3.1.0                # XLSX support for pandas
+xlrd>=2.0.1                    # XLS support for pandas
+
 # Google APIs (Gmail, Calendar sync)
 google-auth>=2.0.0             # Google authentication
 google-auth-oauthlib>=1.0.0    # OAuth2 flow for Google
@@ -32,6 +39,9 @@ seaborn>=0.13.0      # Statistical visualization
 plotly>=5.18.0       # Interactive charts
 pyarrow>=15.0.0      # Arrow format, Parquet support
 kaleido>=0.2.1       # Plotly static image export
+
+# Speaker diarization (PyAnnote + torch on CPU)
+pyannote-audio>=3.1.0
 
 # Development & Testing
 httpx>=0.27.0        # For async client testing
